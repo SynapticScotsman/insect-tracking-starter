@@ -1,0 +1,266 @@
+{
+ "source_project": "Ecology / insect-evs",
+ "source_commit": "aff11f0",
+ "source_files_uncommitted": [],
+ "exporter": "analysis/export_starter.py",
+ "package_scope": "The census chain shown on the Bogong moth recording (12 ms preset) and the bee settings (frozen-recipe preset): BAF noise filter, detect_blobs, link_tracks, per-track wingbeat with a per-track octave call, per-stroke frequency.",
+ "modules": [
+  {
+   "file": "insect_evs/events.py",
+   "source": "src/insect_evs/events.py",
+   "source_sha256": "7a60e5f60b5e223027664d7657d064b5a92dc6d5d0e76ac5e805c3c48e685956",
+   "sha256": "7a60e5f60b5e223027664d7657d064b5a92dc6d5d0e76ac5e805c3c48e685956",
+   "edits": "none (byte copy)"
+  },
+  {
+   "file": "insect_evs/denoise.py",
+   "source": "src/insect_evs/denoise.py",
+   "source_sha256": "871667f0522ad919802b091cc1d8f89942f445200743a5681383661916b80597",
+   "sha256": "871667f0522ad919802b091cc1d8f89942f445200743a5681383661916b80597",
+   "edits": "none (byte copy)"
+  },
+  {
+   "file": "insect_evs/detect.py",
+   "source": "src/insect_evs/detect.py",
+   "source_sha256": "b20379e2d24661ca9623a8e8c45723d2d0c8ed838f33e68b0eb7ccf6f8485429",
+   "sha256": "b20379e2d24661ca9623a8e8c45723d2d0c8ed838f33e68b0eb7ccf6f8485429",
+   "edits": "none (byte copy)"
+  },
+  {
+   "file": "insect_evs/track.py",
+   "source": "src/insect_evs/track.py",
+   "source_sha256": "cabda60734f67017163c1ca3bfe0452ddacb3dbf6492400fc9a7891df142e15d",
+   "sha256": "cabda60734f67017163c1ca3bfe0452ddacb3dbf6492400fc9a7891df142e15d",
+   "edits": "none (byte copy)"
+  },
+  {
+   "file": "insect_evs/periodicity.py",
+   "source": "src/insect_evs/periodicity.py",
+   "source_sha256": "9208ea972ac963a529fc3d0475bb4d9a0c5f531bd500179176babd25bf41fa43",
+   "sha256": "9208ea972ac963a529fc3d0475bb4d9a0c5f531bd500179176babd25bf41fa43",
+   "edits": "none (byte copy)"
+  },
+  {
+   "file": "insect_evs/gate.py",
+   "source": "src/insect_evs/classify.py",
+   "source_sha256": "5b4041b73399146006a2e009a45ae2143df9e841bab53ab6f4620b5a86a1bd27",
+   "sha256": "9fc665401cb63897917f84a1db5ad05587c1936839b015d0e7e5193f84d570fa",
+   "lifted": [
+    {
+     "name": "GateConfig",
+     "lines": [
+      32,
+      87
+     ]
+    },
+    {
+     "name": "TrackResult",
+     "lines": [
+      90,
+      102
+     ]
+    },
+    {
+     "name": "_margins",
+     "lines": [
+      105,
+      122
+     ]
+    },
+    {
+     "name": "gate_score",
+     "lines": [
+      125,
+      140
+     ]
+    },
+    {
+     "name": "PeriodicityGate",
+     "lines": [
+      143,
+      190
+     ]
+    }
+   ],
+   "edits": "header imports written; bodies verbatim"
+  },
+  {
+   "file": "insect_evs/descriptor.py",
+   "source": "evfilt/src/evfilt/periodicity.py",
+   "source_sha256": "7b1db238ebb8e11b4b9267bb4678d69b20c0b1e27cb7b3980d904e32aba47948",
+   "sha256": "1977c13f68dcec7ba0b27a6d189ea60a8c6d3f36c04bd5c6a11db4665048efd5",
+   "lifted": [
+    "descriptor_autocorr"
+   ],
+   "edits": "none"
+  },
+  {
+   "file": "census.py",
+   "source": "analysis/recording_census.py",
+   "source_sha256": "419bc09a58d75222c57ccf8098ecbf50e5b47abafc551e622230aca20015b965",
+   "sha256": "9928e1c80e999da1037a8845ac15a0b7cb3c20cada2303305d747301aa1ed222",
+   "lifted": [
+    {
+     "name": "tuple",
+     "lines": [
+      88,
+      88
+     ]
+    },
+    {
+     "name": "tuple",
+     "lines": [
+      89,
+      89
+     ]
+    },
+    {
+     "name": "VERDICT_COLOUR",
+     "lines": [
+      91,
+      104
+     ]
+    },
+    {
+     "name": "BIN_US",
+     "lines": [
+      106,
+      106
+     ]
+    },
+    {
+     "name": "HOP_US",
+     "lines": [
+      107,
+      107
+     ]
+    },
+    {
+     "name": "CensusConfig",
+     "lines": [
+      110,
+      141
+     ]
+    },
+    {
+     "name": "Census",
+     "lines": [
+      144,
+      185
+     ]
+    },
+    {
+     "name": "scene_lines",
+     "lines": [
+      188,
+      204
+     ]
+    },
+    {
+     "name": "lamp_frequency",
+     "lines": [
+      207,
+      215
+     ]
+    },
+    {
+     "name": "track_path",
+     "lines": [
+      218,
+      231
+     ]
+    },
+    {
+     "name": "pose_autocorr",
+     "lines": [
+      234,
+      269
+     ]
+    },
+    {
+     "name": "pick_fundamental",
+     "lines": [
+      272,
+      297
+     ]
+    },
+    {
+     "name": "same_period_value",
+     "lines": [
+      300,
+      341
+     ]
+    },
+    {
+     "name": "wingbeat_trace",
+     "lines": [
+      344,
+      374
+     ]
+    },
+    {
+     "name": "stroke_times",
+     "lines": [
+      377,
+      443
+     ]
+    },
+    {
+     "name": "running_stroke_rate",
+     "lines": [
+      446,
+      477
+     ]
+    },
+    {
+     "name": "lamp_lock",
+     "lines": [
+      480,
+      490
+     ]
+    },
+    {
+     "name": "_verdict",
+     "lines": [
+      493,
+      504
+     ]
+    },
+    {
+     "name": "_lamp_dominant",
+     "lines": [
+      507,
+      511
+     ]
+    },
+    {
+     "name": "run_census",
+     "lines": [
+      514,
+      637
+     ]
+    },
+    {
+     "name": "coverage",
+     "lines": [
+      640,
+      672
+     ]
+    },
+    {
+     "name": "census_figure",
+     "lines": [
+      883,
+      953
+     ]
+    }
+   ],
+   "edits": [
+    {
+     "old": "from evfilt.periodicity import descriptor_autocorr",
+     "new": "from insect_evs.descriptor import descriptor_autocorr"
+    }
+   ]
+  }
+ ]
+}

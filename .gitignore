@@ -1,0 +1,15 @@
+# Python and the install
+__pycache__/
+.venv/
+
+# Outputs written by try_my_data.py and run.py
+outputs/
+
+# Event recordings and other data: never commit them to this public repository
+*.raw
+*.dat
+*.npz
+*.h5
+*.hdf5
+*.aedat4
+*.zip
