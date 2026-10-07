@@ -1,9 +1,9 @@
 """Make a short slow-motion video of the tracked insects from a finished run.
 
-    python make_clip.py outputs/myrec_moth_0s                    # first 2 s, 1/10 speed
-    python make_clip.py outputs/myrec_moth_0s --start 1.5 --seconds 1
-    python make_clip.py outputs/myrec_moth_0s --follow 14        # zoom on track 14
-    python make_clip.py outputs/mybees_bee_0s --slow 40 --seconds 0.5
+    python make_clip.py outputs/mybees_bee_0s                    # bees: first 0.5 s, 1/40 speed
+    python make_clip.py outputs/mybees_bee_0s --start 1.2
+    python make_clip.py outputs/mybees_bee_0s --follow 134       # zoom on track 134
+    python make_clip.py outputs/mymoths_moth_0s                  # moths: first 2 s, 1/10 speed
 
 What each frame shows:
 - events from the last few milliseconds: blue ON (brighter), orange OFF
@@ -109,20 +109,25 @@ def open_writer(path: Path, size, fps):
         return vw.write, vw.release
 
 
-def make_clip(run_dir, start=None, seconds=2.0, slow=10.0, follow=None, zoom_px=150,
+def make_clip(run_dir, start=None, seconds=None, slow=None, follow=None, zoom_px=150,
               fps=25, out=None) -> Path:
     """Write an MP4 of a finished run and return its path.
 
     start    seconds after the run's start (default 0, or the followed track's start)
     seconds  how much recording time the clip covers
-    slow     slow-motion factor: 10 plays 1 s of recording in 10 s. About 10 suits
-             moths; bees beat about 230 times a second and need about 40.
+    slow     slow-motion factor: 10 plays 1 s of recording in 10 s. Bees beat
+             about 230 times a second and need about 40; moths about 10.
+             By default, and for `seconds`, the run's preset decides: a bee
+             run gets 0.5 s at 1/40, any other 2 s at 1/10, both 20 s of video.
     follow   a track ID to keep centred and zoomed in on, zoom_px pixels above and
              below it. With several processing windows, the first window that has
              that ID is used.
     """
     run_dir = Path(run_dir)
     summary, tracks, dets, strokes = load_run(run_dir)
+    bee = summary.get("preset") == "bee"
+    slow = slow or (40.0 if bee else 10.0)
+    seconds = seconds or (0.5 if bee else 2.0)
     paths = track_paths(tracks, dets, strokes)
     W, H = summary["input_metadata"]["width"], summary["input_metadata"]["height"]
     run0 = summary["selection"]["requested_start_us"]
@@ -221,8 +226,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("run_dir", type=Path, help="output folder of run.py or try_my_data.py")
     p.add_argument("--start", type=float, help="seconds after the run's start")
-    p.add_argument("--seconds", type=float, default=2.0, help="recording time covered")
-    p.add_argument("--slow", type=float, default=10.0, help="slow-motion factor (bees: ~40)")
+    p.add_argument("--seconds", type=float,
+                   help="recording time covered (default: 0.5 for a bee run, 2 otherwise)")
+    p.add_argument("--slow", type=float,
+                   help="slow-motion factor (default: 40 for a bee run, 10 otherwise)")
     p.add_argument("--follow", type=int, help="track ID to zoom in on")
     p.add_argument("--zoom-px", type=int, default=150, help="half-height of the followed view, px")
     p.add_argument("--out", type=Path, help="output .mp4 (default: in the run folder)")

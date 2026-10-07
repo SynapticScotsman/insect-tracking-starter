@@ -14,9 +14,10 @@ each step lives in the code.
    with known wingbeats (`synthetic_events`).
 
 2. `event_input.py: open_recording()` recognises a Kairos `.raw.kai` by its
-   first bytes (`kairos_metadata`) or else reads a Prophesee `.raw` header
-   (`header_metadata`), takes the encoding and sensor size from it, and hands
-   the events to faery to decode. `canonical()` checks every
+   first bytes (`kairos_metadata`), a Prophesee `.raw` by its text header
+   (`header_metadata`), and every other type by its extension. faery decodes
+   the camera formats; numpy, csv and h5py read the array formats.
+   `canonical()` checks every
    packet: integer coordinates and microsecond timestamps, polarity mapped to
    -1/+1. `select_packets()` applies the time range and optional region.
 

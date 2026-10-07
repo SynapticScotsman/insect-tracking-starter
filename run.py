@@ -247,13 +247,13 @@ def run(args):
     return 0
 
 
-def track(input=None, preset="moth", out="out", start=0.0, duration=4.0, window=4.0,
+def track(input=None, preset="bee", out="out", start=0.0, duration=4.0, window=4.0,
           band=None, window_ms=None, max_size=None, roi=None, width=None, height=None,
           encoding=None, figures=True, seed=7):
     """Track every insect in a recording and measure its wingbeat, in one call.
 
         import run
-        folder = run.track("recording.raw", preset="moth", start=10, duration=8)
+        folder = run.track("bees.raw", preset="bee", start=10, duration=4)
 
     The arguments are the command-line options of the same name; `input=None`
     runs the synthetic demo. Writes tracks.csv, strokes.csv, detections.csv,
@@ -277,9 +277,10 @@ def main():
     one-line message with exit status 2 instead of a traceback."""
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--input", type=Path,
-                   help="Prophesee .raw or Kairos .raw.kai recording; omit for a synthetic demo")
-    p.add_argument("--preset", choices=sorted(PRESETS), default="moth",
-                   help="moth: 12 ms detector, 18-80 Hz; bee: 5 ms detector, 120-320 Hz; "
+                   help="event recording: .raw, .raw.kai, .dat, .es, .aedat4, .npz, .csv or .h5; "
+                        "omit for a synthetic demo")
+    p.add_argument("--preset", choices=sorted(PRESETS), default="bee",
+                   help="bee (default): 5 ms detector, 120-320 Hz; moth: 12 ms detector, 18-80 Hz; "
                         "wide: 8 ms detector, 15-500 Hz, for unknown flyers")
     p.add_argument("--band", nargs=2, type=float, metavar=("LO", "HI"),
                    help="override the wingbeat range, Hz")
@@ -290,8 +291,8 @@ def main():
     p.add_argument("--duration", type=float, default=4.0, help="seconds to process")
     p.add_argument("--window", type=float, default=4.0, help="processing window, seconds")
     p.add_argument("--roi", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"))
-    p.add_argument("--width", type=int, help="sensor width, px, if the .raw header lacks it")
-    p.add_argument("--height", type=int, help="sensor height, px, if the .raw header lacks it")
+    p.add_argument("--width", type=int, help="sensor width, px, if the file does not store it (CSV)")
+    p.add_argument("--height", type=int, help="sensor height, px, if the file does not store it (CSV)")
     p.add_argument("--encoding", choices=["evt2", "evt21", "evt3"],
                    help="event encoding, if the .raw header lacks it")
     p.add_argument("--no-figures", dest="figures", action="store_false",
