@@ -196,7 +196,38 @@ def main() -> int:
                 open_file(figures[0])
         except EOFError:
             pass
+    # Optional video. Answers run out when they are piped in, which ends here.
+    try:
+        make_video(out, preset, a.no_open)
+    except EOFError:
+        pass
     return 0
+
+
+def make_video(out: Path, preset: str, no_open: bool) -> None:
+    """Offer a short slow-motion clip of the run (make_clip.py)."""
+    if ask("Make a short video clip? (y/n)", "n", str.lower, lambda v: v in ("y", "n"),
+           "answer y or n") != "y":
+        return
+    import make_clip
+    # Bees beat about 230 times a second, so they need a slower, shorter clip.
+    fast = preset == "bee"
+    follow = ask("Track ID to follow (Enter for the whole view)", "", str,
+                 lambda v: v == "" or v.isdigit(), "answer a track number or press Enter")
+    start = ask("Start, seconds after the run's start", 0.0, float, lambda v: v >= 0,
+                "must be 0 or more")
+    seconds = ask("Seconds of recording to show", 0.5 if fast else 2.0, float, lambda v: v > 0,
+                  "must be more than 0")
+    slow = ask("Slow-motion factor", 40.0 if fast else 10.0, float, lambda v: v >= 1,
+               "must be 1 or more")
+    try:
+        clip = make_clip.make_clip(out, start=start, seconds=seconds, slow=slow,
+                                   follow=int(follow) if follow else None)
+    except ValueError as exc:
+        print("  no clip: {}".format(exc))
+        return
+    if not no_open:
+        open_file(clip)
 
 
 if __name__ == "__main__":

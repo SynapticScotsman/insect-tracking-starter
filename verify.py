@@ -66,7 +66,7 @@ def check_wingbeats(out, true_hz, tol, stroke_tol):
 
 
 def main():
-    """Run the five groups of checks in turn and print what passed."""
+    """Run the six groups of checks in turn and print what passed."""
     checks = []
     with tempfile.TemporaryDirectory(prefix="insect-starter-check-") as work:
         work = Path(work)
@@ -171,6 +171,18 @@ def main():
         pd.testing.assert_frame_equal(pd.read_csv(work / "typed" / "tracks.csv"), baseline,
                                       check_exact=False, rtol=1e-12)
         checks.append("try_my_data.py with typed answers gives the same tracks as run.py")
+
+        # 6. The one-call Python function, then a video clip made from its
+        # output: 0.4 s of recording at 1/10 speed is about 100 frames.
+        import cv2
+        import make_clip
+        import run
+        folder = run.track(None, preset="moth", out=work / "api", duration=1, window=1, figures=False)
+        assert list(pd.read_csv(folder / "tracks.csv").columns) == list(baseline.columns)
+        clip = make_clip.make_clip(folder, seconds=0.4, slow=10)
+        frames = int(cv2.VideoCapture(str(clip)).get(cv2.CAP_PROP_FRAME_COUNT))
+        assert 90 <= frames <= 110, "clip has {} frames".format(frames)
+        checks.append("run.track() from Python, and make_clip.py writes a {}-frame clip".format(frames))
     print(json.dumps({"checks_passed": checks}, indent=2))
 
 

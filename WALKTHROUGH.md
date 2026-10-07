@@ -4,8 +4,8 @@
 each step lives in the code.
 
 0. `try_my_data.py` asks for a file and the settings, then calls `run.run()`
-   with them and reads the outputs back. Everything below is the same whether
-   you start there or at `run.py`.
+   with them and reads the outputs back. `run.track()` is the same thing as
+   one Python call. Everything below is the same whichever you start from.
 
 1. `run.py: main()` parses the command; `run()` opens the recording, picks the
    preset (`PRESETS`) with any `--band`, `--window-ms` or `--max-size` laid
@@ -51,6 +51,11 @@ each step lives in the code.
    through its neighbours. `running_stroke_rate` turns those strokes into the
    changing wingbeat number, the median rate of the last five. Then the tables
    and `census_figure` are written.
+
+5. `make_clip.py: make_clip()` reads a finished run's tables and the
+   recording named in `summary.json`, and draws each frame: the events, then
+   every live track's circle, ID, trail and wingbeat number. It does not run
+   the tracking again.
 
 Events in, tracks and frequencies out; nothing is trained and nothing is
 downloaded. A box is the algorithm's hypothesis, not a label.

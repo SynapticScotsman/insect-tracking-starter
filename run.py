@@ -171,6 +171,7 @@ def run(args):
     started = time.perf_counter()
     summary = dict(preset=args.preset, config=asdict(cfg), input=str(args.input or "synthetic"),
                    input_metadata=metadata, selection=dict(status, roi=args.roi),
+                   duration_s=args.duration, seed=args.seed, encoding=args.encoding,
                    window_s=args.window, windows=[],
                    interpretation="Counts and frequencies only; no accuracy was measured. "
                                   "Tracks are not animals: one animal can be several tracks.")
@@ -244,6 +245,31 @@ def run(args):
     nw = sum(w["wingbeat_tracks"] for w in summary["windows"])
     print("{} windows, {} tracks, {} with a wingbeat. Outputs in {}".format(len(summary["windows"]), nt, nw, out))
     return 0
+
+
+def track(input=None, preset="moth", out="out", start=0.0, duration=4.0, window=4.0,
+          band=None, window_ms=None, max_size=None, roi=None, width=None, height=None,
+          encoding=None, figures=True, seed=7):
+    """Track every insect in a recording and measure its wingbeat, in one call.
+
+        import run
+        folder = run.track("recording.raw", preset="moth", start=10, duration=8)
+
+    The arguments are the command-line options of the same name; `input=None`
+    runs the synthetic demo. Writes tracks.csv, strokes.csv, detections.csv,
+    summary.json and one figure per window, and returns the output folder.
+    make_clip.make_clip(folder) then makes a video from it.
+    """
+    if duration <= 0 or window <= 0 or start < 0:
+        raise ValueError("duration and window must be positive, start non-negative")
+    if preset not in PRESETS:
+        raise ValueError("preset must be one of " + ", ".join(sorted(PRESETS)))
+    args = argparse.Namespace(
+        input=Path(input) if input else None, preset=preset, out=Path(out), start=start,
+        duration=duration, window=window, band=band, window_ms=window_ms, max_size=max_size,
+        roi=roi, width=width, height=height, encoding=encoding, figures=figures, seed=seed)
+    run(args)
+    return args.out.resolve()
 
 
 def main():

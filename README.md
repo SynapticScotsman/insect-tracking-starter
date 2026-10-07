@@ -39,6 +39,39 @@ wingbeat of the longest tracks. Every question has a default in brackets;
 press Enter to take it. Outputs go to `outputs/NAME_SETTINGS_STARTs/`. It runs
 exactly the code below; `run.py` is the same thing driven by flags.
 
+## Use from Python
+
+```python
+import run, make_clip
+
+folder = run.track("recording.raw", preset="moth", start=10, duration=8, out="moth_out")
+make_clip.make_clip(folder, start=1.0, seconds=2.0)          # whole view, 1/10 speed
+make_clip.make_clip(folder, follow=14)                       # zoom on track 14
+```
+
+`run.track` takes the same options as `run.py` below and returns the output
+folder. Run it from this folder, or add this folder to `sys.path`.
+
+## Videos
+
+`make_clip.py` turns a finished run into a short slow-motion MP4, without
+running the tracking again:
+
+```powershell
+.venv\Scripts\python.exe make_clip.py moth_out --start 1 --seconds 2
+.venv\Scripts\python.exe make_clip.py moth_out --follow 14
+.venv\Scripts\python.exe make_clip.py bee_out --seconds 0.5 --slow 40
+```
+
+Each frame shows the last few milliseconds of events: blue for ON (brighter),
+orange for OFF (darker), cyan for events no track is near, which is where an
+insect was missed. Every live track has a circle, its ID and a short trail.
+Magenta tracks have a measured wingbeat and show `rate_median5_hz`, grey ones
+do not. `--slow 10` suits moths; bees beat about 230 times a second and need
+about `--slow 40` to see the number change. `--follow ID` keeps one track
+centred and zoomed in. `try_my_data.py` offers a clip at the end of each run.
+The clip is written into the run folder.
+
 ## Run
 
 ```powershell
@@ -158,7 +191,8 @@ timestamps running at half speed, which halves every frequency.
 Synthetic insects with known wingbeats come back within 1% (all three presets);
 NPZ, CSV, HDF5 and EVT3 RAW copies of the same events give identical tracks;
 `try_my_data.py` with typed answers gives the same tracks as `run.py`;
-malformed input is rejected with a message.
+malformed input is rejected with a message; `run.track` works from Python and
+`make_clip.py` writes a playable clip.
 
 ## Read the code
 
