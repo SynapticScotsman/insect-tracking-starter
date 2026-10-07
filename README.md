@@ -1,8 +1,8 @@
 # Insect tracking and wingbeat starter
 
-Give it an event-camera recording; it finds the flying insects, tracks them,
-and measures each one's wingbeat, as a per-track frequency and as the time of
-every wing stroke.
+Give it a raw event-camera recording, a Prophesee `.raw` or a Kairos
+`.raw.kai`; it finds the flying insects, tracks them, and measures each one's
+wingbeat, as a per-track frequency and as the time of every wing stroke.
 
 The algorithm files (`census.py` and `insect_evs/`) are copied from a private
 research repository; `PROVENANCE.json` names the source commit and
@@ -17,11 +17,10 @@ Unzip the folder and open a terminal inside it. Windows, Python 3.9 or newer:
 
 ```powershell
 py -3.9 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements-raw.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-On macOS or Linux use `python3 -m venv .venv` and `.venv/bin/python`. For
-NPZ/CSV input only, `requirements.txt` is enough; for HDF5 add `h5py`.
+On macOS or Linux use `python3 -m venv .venv` and `.venv/bin/python`.
 
 `numba` is required, not optional: without it the noise filter falls back to
 a slower approximation that gives slightly different results.
@@ -166,17 +165,15 @@ What the numbers are, and how well they were measured:
   even in a recording with no lamp, and a wingbeat within 1 Hz of 1, 2 or 3
   times that line is not reported. Near 200 Hz this can drop a bee.
 
-## Supported formats
+## Input files
 
-| Format | Layout |
-|---|---|
-| `.raw` | Prophesee/Metavision EVT2, EVT2.1 or EVT3, decoded by faery. Encoding and size come from the header; headerless files need `--encoding`, `--width`, `--height`. |
-| `.dat` | Prophesee DAT, decoded by faery. |
-| `.npz` | 1D arrays `x`, `y`, `t` (microseconds), `p`; optional `width`, `height`. |
-| `.csv` | Headers `x,y,t_us,polarity` or `x,y,t,p`; pass `--width`, `--height`. |
-| `.h5` | `x`, `y`, `t`, `p` datasets at root or under `/events`; `width`/`height` attributes. |
+| File | From | How it is read |
+|---|---|---|
+| `.raw` | Prophesee/Metavision software, and cameras on Prophesee sensors such as the IDS uEye EVS | EVT2, EVT2.1 or EVT3, named with the sensor size in the file's text header. A file with no header needs `--encoding`, `--width` and `--height`. |
+| `.raw.kai` | the Kairos recorder (a Prophesee EVK4) | EVT3 behind a 16-byte binary header that holds the sensor size. The header is swapped for a Prophesee one in a temporary copy, which is deleted after reading. The `.index.kai`, `.samples.kai` and `.toml` files beside it are not needed. |
 
-Polarity may be -1/+1, 0/1 or boolean. Events must be in time order.
+The file type is recognised from its first bytes, so a Kairos file is read as
+one whatever it is called. Both are decoded by the faery library.
 
 Do not swap faery for the expelliarmus decoder. On EVT3 recordings from an IDS
 camera (Sony IMX636 sensor), expelliarmus returns the right events with
@@ -189,7 +186,8 @@ timestamps running at half speed, which halves every frequency.
 ```
 
 Synthetic insects with known wingbeats come back within 1% (all three presets);
-NPZ, CSV, HDF5 and EVT3 RAW copies of the same events give identical tracks;
+the same events written as Prophesee EVT2 and EVT3 `.raw` and as a Kairos
+`.raw.kai` give identical tracks;
 `try_my_data.py` with typed answers gives the same tracks as `run.py`;
 malformed input is rejected with a message; `run.track` works from Python and
 `make_clip.py` writes a playable clip.

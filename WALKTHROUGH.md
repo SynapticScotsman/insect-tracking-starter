@@ -13,8 +13,10 @@ each step lives in the code.
    windows (`windows_of`). Without `--input` it builds two synthetic insects
    with known wingbeats (`synthetic_events`).
 
-2. `event_input.py: open_recording()` chooses the decoder (faery for `.raw` and
-   `.dat`) and reads the sensor size from the header. `canonical()` checks every
+2. `event_input.py: open_recording()` recognises a Kairos `.raw.kai` by its
+   first bytes (`kairos_metadata`) or else reads a Prophesee `.raw` header
+   (`header_metadata`), takes the encoding and sensor size from it, and hands
+   the events to faery to decode. `canonical()` checks every
    packet: integer coordinates and microsecond timestamps, polarity mapped to
    -1/+1. `select_packets()` applies the time range and optional region.
 

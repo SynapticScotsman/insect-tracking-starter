@@ -276,7 +276,8 @@ def main():
     """Command line: check the options, run, and turn input errors into a
     one-line message with exit status 2 instead of a traceback."""
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--input", type=Path, help=".raw/.dat/.npz/.csv/.h5 events; omit for a synthetic demo")
+    p.add_argument("--input", type=Path,
+                   help="Prophesee .raw or Kairos .raw.kai recording; omit for a synthetic demo")
     p.add_argument("--preset", choices=sorted(PRESETS), default="moth",
                    help="moth: 12 ms detector, 18-80 Hz; bee: 5 ms detector, 120-320 Hz; "
                         "wide: 8 ms detector, 15-500 Hz, for unknown flyers")
@@ -289,9 +290,10 @@ def main():
     p.add_argument("--duration", type=float, default=4.0, help="seconds to process")
     p.add_argument("--window", type=float, default=4.0, help="processing window, seconds")
     p.add_argument("--roi", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"))
-    p.add_argument("--width", type=int)
-    p.add_argument("--height", type=int)
-    p.add_argument("--encoding", choices=["evt2", "evt21", "evt3", "dat"])
+    p.add_argument("--width", type=int, help="sensor width, px, if the .raw header lacks it")
+    p.add_argument("--height", type=int, help="sensor height, px, if the .raw header lacks it")
+    p.add_argument("--encoding", choices=["evt2", "evt21", "evt3"],
+                   help="event encoding, if the .raw header lacks it")
     p.add_argument("--no-figures", dest="figures", action="store_false",
                    help="skip the per-window census figure")
     p.add_argument("--seed", type=int, default=7, help="synthetic demo only")

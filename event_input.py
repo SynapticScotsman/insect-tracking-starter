@@ -1,9 +1,16 @@
-"""Decode event files into packets of x, y, timestamp (microseconds), polarity.
+"""Read a raw event recording as packets of x, y, timestamp (us), polarity.
 
-".raw" is a container name, not one format. This reader supports
-Prophesee/Metavision EVT2, EVT2.1 and EVT3, and Prophesee DAT, through the
-faery library, plus NPZ, CSV and HDF5. It reads the file in bounded packets
-rather than loading the whole recording.
+Two kinds of raw file are accepted, told apart by their first bytes:
+
+- Prophesee .raw, written by Prophesee/Metavision software and by cameras
+  built on Prophesee sensors, such as the IDS uEye EVS. The events use one of
+  three encodings, EVT2, EVT2.1 or EVT3, named in a text header.
+- Kairos .raw.kai, written by the Kairos recorder from a Prophesee EVK4. A
+  16-byte binary header ("KAIROS-RAW", version, type, width, height) is
+  followed by plain EVT3 data.
+
+The faery library decodes the events. The file is read in bounded packets,
+so a long recording never has to fit in memory.
 
 Use faery, not the expelliarmus decoder. On EVT3 files from an IDS uEye EVS
 camera (Sony IMX636 sensor), expelliarmus returns the right events with
@@ -11,32 +18,21 @@ timestamps running at half speed: a lamp flickering at 100 Hz reads 50 Hz,
 and every speed, duration and frequency computed later is halved.
 """
 from pathlib import Path
-import csv
 import re
+import shutil
+import struct
+import tempfile
 
 import numpy as np
 
-
-ALIASES = {"x": ("x",), "y": ("y",), "t": ("t_us", "t", "timestamp"),
-           "p": ("polarity", "p", "on")}
-
-
-def columns(names):
-    """Resolve supported column names without guessing their units."""
-    lookup = {name.lower(): name for name in names}
-    result = {}
-    for key, alternatives in ALIASES.items():
-        for alternative in alternatives:
-            if alternative in lookup:
-                result[key] = lookup[alternative]
-                break
-        else:
-            raise ValueError("missing {} field; accepted names: {}".format(key, alternatives))
-    return result
+KAIROS_SIGNATURE = b"KAIROS-RAW"
+KAIROS_HEADER_BYTES = 16      # signature (10), version (1), type (1), width (2), height (2)
 
 
 def canonical(arrays):
-    """Validate before casting, so fractional coordinates are never truncated."""
+    """Check one packet's x, y, t, p arrays and stack them as an (n, 4) int64
+    array with polarity -1 (OFF) / +1 (ON). Values are validated before any
+    cast, so a fractional coordinate is refused rather than truncated."""
     checked = []
     for name in ("x", "y", "t", "p"):
         # A contiguous, aligned copy first. faery hands over fields of packed
@@ -73,7 +69,7 @@ def canonical(arrays):
 
 
 def header_metadata(path):
-    """Encoding and sensor size from a Prophesee header.
+    """Encoding and sensor size from a .raw file's header.
 
     The header is a run of ASCII lines starting with '%' before the binary
     events. Only those lines are read, so event bytes are never decoded as
@@ -113,56 +109,6 @@ def header_metadata(path):
     return {"encoding": encoding, **dimensions}
 
 
-def _csv_packets(path, size=8192):
-    """Read a CSV with a header row, `size` events at a time. Every value must
-    be an integer: coordinates in pixels, time in microseconds."""
-    # utf-8-sig skips the byte-order mark that spreadsheet programs often
-    # write at the start of a CSV file.
-    with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        names = columns(reader.fieldnames or [])
-        batch = []
-        for line, row in enumerate(reader, 2):
-            try:
-                batch.append([int(row[names[key]]) for key in ("x", "y", "t", "p")])
-            except (TypeError, ValueError) as exc:
-                raise ValueError("CSV line {} needs integer values".format(line)) from exc
-            if len(batch) == size:
-                array = np.asarray(batch, dtype=np.int64)
-                yield canonical(dict(zip(("x", "y", "t", "p"), array.T)))
-                batch = []
-        if batch:
-            yield canonical(dict(zip(("x", "y", "t", "p"), np.asarray(batch).T)))
-
-
-def _numpy_packets(path):
-    with np.load(path, allow_pickle=False) as data:
-        names = columns(data.files)
-        arrays = {key: data[name] for key, name in names.items()}
-        # Compressed NPZ arrays decompress in memory. RAW, CSV and HDF5 stream.
-        packet = canonical(arrays)
-        for start in range(0, len(packet), 8192):
-            yield packet[start:start + 8192]
-
-
-def _h5_group(handle):
-    return handle["events"] if "events" in handle else handle
-
-
-def _h5_packets(path):
-    """Read x, y, t, p datasets (at the file's root or under /events) in
-    slices of 8,192 events, so a large file never has to fit in memory."""
-    import h5py
-    with h5py.File(path, "r") as handle:
-        group = _h5_group(handle)
-        names = columns(group.keys())
-        lengths = {len(group[name]) for name in names.values()}
-        if len(lengths) != 1:
-            raise ValueError("HDF5 event arrays must have equal lengths")
-        for start in range(0, lengths.pop(), 8192):
-            yield canonical({key: group[name][start:start + 8192] for key, name in names.items()})
-
-
 FAERY_VERSION = {"evt2": "evt2", "evt21": "evt2.1", "evt3": "evt3"}
 
 
@@ -170,8 +116,8 @@ def _raw_packets(path, encoding, width, height):
     """faery packets carry t (microseconds), x, y and a boolean `on`.
 
     faery reads the encoding and sensor size from the file header. The
-    fallbacks below only matter for a headerless file; open_recording has
-    already made sure width and height are known, because faery would
+    fallbacks below only matter for a file without a header; open_recording
+    has already made sure width and height are known, because faery would
     otherwise assume 1280 x 720 without saying so."""
     import faery
     stream = faery.events_stream_from_file(
@@ -183,77 +129,95 @@ def _raw_packets(path, encoding, width, height):
                              "t": packet["t"], "p": packet["on"]})
 
 
+def kairos_metadata(path):
+    """Encoding and sensor size from a Kairos .raw.kai header, or None when
+    the file does not start with the Kairos signature."""
+    with path.open("rb") as handle:
+        head = handle.read(KAIROS_HEADER_BYTES)
+    if not head.startswith(KAIROS_SIGNATURE) or len(head) < KAIROS_HEADER_BYTES:
+        return None
+    version, kind = head[10], head[11]
+    if kind != 0:
+        raise ValueError("Kairos file type {} is not EVT3, the only type this reader knows".format(kind))
+    width, height = struct.unpack("<HH", head[12:16])
+    return {"format": "kairos", "kairos_version": version, "encoding": "evt3",
+            "width": width, "height": height}
+
+
+EVT3_HEADER = b"% evt 3.0\n% end\n"    # the smallest Prophesee header faery accepts
+
+
+def _kairos_packets(path, width, height):
+    """Events of a Kairos file. faery reads only whole files and does not know
+    the Kairos header, so the header is swapped for a minimal Prophesee EVT3
+    header in a temporary copy, which faery decodes and which is deleted
+    afterwards. The EVT3 data starts with a time word, so it decodes
+    correctly with no earlier decoder state."""
+    import faery
+    tmp = Path(tempfile.mkdtemp(prefix="kairos-"))
+    stream = None
+    try:
+        payload = tmp / "events.raw"
+        with path.open("rb") as src, payload.open("wb") as dst:
+            dst.write(EVT3_HEADER)
+            src.seek(KAIROS_HEADER_BYTES)
+            shutil.copyfileobj(src, dst, 16 << 20)
+        stream = faery.events_stream_from_file(
+            str(payload), dimensions_fallback=(int(width), int(height)), version_fallback="evt3")
+        for packet in stream:
+            if len(packet):
+                yield canonical({"x": packet["x"], "y": packet["y"],
+                                 "t": packet["t"], "p": packet["on"]})
+    finally:
+        # faery holds the copy open until its stream is released; Windows
+        # refuses to delete an open file.
+        del stream
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def open_recording(path, width=None, height=None, encoding=None):
-    """Return sensor metadata and a lazy packet iterator. Never infer sensor
-    dimensions from active pixels: a quiet border is still part of the sensor.
-    """
+    """Sensor metadata and a lazy packet iterator for a raw recording,
+    Prophesee .raw or Kairos .raw.kai.
+
+    The sensor size comes from the header, or from width and height when the
+    header lacks it. It is never guessed from where events landed: a quiet
+    border is still part of the sensor."""
     path = Path(path)
-    ext = path.suffix.lower()
-    # Width and height are checked for every format before any event is
-    # decoded: every later step needs the true sensor size.
-    if ext not in (".raw", ".dat", ".csv", ".npz", ".h5", ".hdf5"):
-        raise ValueError("supported event inputs: RAW, DAT, CSV, NPZ, H5/HDF5; ordinary video is not supported")
     if not path.is_file():
         raise ValueError("input file does not exist: {}".format(path))
-    metadata = {"format": ext[1:]}
-    if ext in (".raw", ".dat"):
-        try:
-            import faery  # noqa: F401
-        except ImportError as exc:
-            raise ValueError("RAW/DAT needs: python -m pip install -r requirements-raw.txt") from exc
-        # Prophesee files: encoding and size from the header unless given
-        # on the command line.
-        metadata.update(header_metadata(path))
-        encoding = encoding or ("dat" if ext == ".dat" else metadata.get("encoding"))
-        if not encoding:
-            raise ValueError("RAW header does not identify its encoding; pass --encoding evt2, evt21 or evt3")
-        metadata["encoding"] = encoding
-        for key, override in (("width", width), ("height", height)):
-            if override is not None:
-                metadata[key] = override
-            if key not in metadata or metadata[key] < 1:
-                raise ValueError("sensor {} missing; pass --{} in pixels".format(key, key))
-        packets = _raw_packets(path, encoding, metadata["width"], metadata["height"])
-    elif ext == ".npz":
-        # NPZ and HDF5 may store the size alongside the events; CSV cannot,
-        # so a CSV needs --width and --height.
-        with np.load(path, allow_pickle=False) as data:
-            for key in ("width", "height"):
-                if key in data:
-                    metadata[key] = int(data[key])
-        packets = _numpy_packets(path)
-    elif ext in (".h5", ".hdf5"):
-        try:
-            import h5py
-        except ImportError as exc:
-            raise ValueError("HDF5 needs: python -m pip install h5py") from exc
-        with h5py.File(path, "r") as handle:
-            group = _h5_group(handle)
-            if not hasattr(group, "keys"):
-                raise ValueError("HDF5 needs separate x,y,t,p arrays at root or in /events")
-            columns(group.keys())
-            for key in ("width", "height"):
-                if key in group.attrs or key in handle.attrs:
-                    metadata[key] = int(group.attrs.get(key, handle.attrs.get(key)))
-        packets = _h5_packets(path)
-    else:
-        packets = _csv_packets(path)
+    try:
+        import faery  # noqa: F401
+    except ImportError as exc:
+        raise ValueError("raw files need faery: python -m pip install -r requirements.txt") from exc
+    kairos = kairos_metadata(path)
+    if kairos:
+        return kairos, _kairos_packets(path, kairos["width"], kairos["height"])
+    if path.suffix.lower() != ".raw":
+        raise ValueError("this package reads Prophesee .raw and Kairos .raw.kai event recordings; "
+                         "{} is not one".format(path.name))
+    metadata = {"format": "raw"}
+    metadata.update(header_metadata(path))
+    encoding = encoding or metadata.get("encoding")
+    if not encoding:
+        raise ValueError("the .raw header does not name its encoding; pass --encoding evt2, evt21 or evt3")
+    metadata["encoding"] = encoding
     for key, override in (("width", width), ("height", height)):
         if override is not None:
             metadata[key] = override
         if key not in metadata or metadata[key] < 1:
-            raise ValueError("sensor {} missing; pass --{} in pixels".format(key, key))
-    return metadata, packets
+            raise ValueError("sensor {} missing from the header; pass --{} in pixels".format(key, key))
+    return metadata, _raw_packets(path, encoding, metadata["width"], metadata["height"])
 
 
 def select_packets(packets, metadata, start_s, duration_s, roi, status):
     """Crop by time and optionally region, preserving input order, as arrays.
 
-    --start is relative to the first decoded event. Output timestamps keep the
+    start_s is relative to the first decoded event. Output timestamps keep the
     recording's original microsecond clock. Yields (n, 4) int64 arrays of
     x, y, t, p. Whole packets, not single events: a 4 s window of a busy
     1280x720 recording is about 5 million events, and a Python tuple per event
-    costs minutes before any processing starts.
+    costs minutes before any processing starts. Fills `status` with the
+    recording's first event time and the absolute start and end selected.
     """
     origin = previous = None
     for packet in packets:

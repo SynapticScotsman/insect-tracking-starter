@@ -1,13 +1,13 @@
 """Check an install, offline, on generated events.
 
-Run after installing requirements-raw.txt and h5py. The checks cover data
-handling and whether known wingbeats come back from synthetic insects; they
-do not measure accuracy on real recordings. All files go to a temporary
-folder that is deleted afterwards. Prints the list of checks passed; any
-failure stops with an AssertionError that says what was wrong.
+Run after installing requirements.txt. The checks cover reading raw files
+and whether known wingbeats come back from synthetic insects; they do not
+measure accuracy on real recordings. All files go to a temporary folder that
+is deleted afterwards. Prints the list of checks passed; any failure stops
+with an AssertionError that says what was wrong.
 """
-import csv
 import json
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -92,43 +92,30 @@ def main():
         # 2. Every input format gives the same tracks as the in-memory demo:
         # the same events are written as NPZ (signed and 0/1 polarity), CSV,
         # HDF5 (at the root and under /events) and EVT3 RAW, then read back.
+        import faery
         ev = synthetic_events(2.0, 7, 320, 240, (38.0, 52.0))
         x, y, t, p = ev.T
-        np.savez(work / "ev.npz", x=x, y=y, t=t, p=p, width=320, height=240)
-        np.savez(work / "ev01.npz", x=x, y=y, t=t, p=(p > 0).astype(np.uint8), width=320, height=240)
-        with open(work / "ev.csv", "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["x", "y", "t_us", "polarity"])
-            w.writerows(ev.tolist())
-        inputs = [(work / "ev.npz", []), (work / "ev01.npz", []),
-                  (work / "ev.csv", ["--width", 320, "--height", 240])]
-        try:
-            import h5py
-            for group_name in ("root", "events"):
-                with h5py.File(work / (group_name + ".h5"), "w") as h:
-                    g = h if group_name == "root" else h.create_group("events")
-                    for name, v in (("x", x), ("y", y), ("t", t), ("p", p)):
-                        g.create_dataset(name, data=v)
-                    g.attrs["width"], g.attrs["height"] = 320, 240
-                inputs.append((work / (group_name + ".h5"), []))
-        except ImportError:
-            checks.append("HDF5 SKIPPED: pip install h5py")
-        try:
-            import faery
-            rec = np.zeros(len(t), dtype=faery.EVENTS_DTYPE)
-            rec["t"], rec["x"], rec["y"], rec["on"] = t, x, y, p > 0
+        rec = np.zeros(len(t), dtype=faery.EVENTS_DTYPE)
+        rec["t"], rec["x"], rec["y"], rec["on"] = t, x, y, p > 0
+        for version in ("evt2", "evt3"):
             faery.events_stream_from_array(rec, dimensions=(320, 240)).to_file(
-                str(work / "ev.raw"), version="evt3", zero_t0=False)
-            inputs.append((work / "ev.raw", []))
-        except ImportError:
-            checks.append("RAW SKIPPED: install requirements-raw.txt")
-        for i, (path, flags) in enumerate(inputs):
+                str(work / "ev_{}.raw".format(version)), version=version, zero_t0=False)
+        # A Kairos file, built as Kairos writes one: the 16-byte header
+        # ("KAIROS-RAW", version 0, type 0 = EVT3, width and height as
+        # little-endian 16-bit numbers) in front of the EVT3 data, which here
+        # is the EVT3 file above without its "%" text header.
+        evt3 = (work / "ev_evt3.raw").read_bytes()
+        body = 0
+        while evt3[body:body + 1] == b"%":                 # skip every "%" header line
+            body = evt3.index(b"\n", body) + 1
+        (work / "ev.raw.kai").write_bytes(b"KAIROS-RAW\x00\x00" + struct.pack("<HH", 320, 240) + evt3[body:])
+        inputs = [work / "ev_evt2.raw", work / "ev_evt3.raw", work / "ev.raw.kai"]
+        for i, path in enumerate(inputs):
             out = work / ("fmt{}".format(i))
-            command("--input", path, "--preset", "moth", "--duration", 2, "--window", 2, *flags, "--out", out)
+            command("--input", path, "--preset", "moth", "--duration", 2, "--window", 2, "--out", out)
             got = pd.read_csv(out / "tracks.csv")
             pd.testing.assert_frame_equal(got, baseline, check_exact=False, rtol=1e-12)
-        checks.append("NPZ, 0/1-polarity NPZ, CSV, HDF5 and EVT3 RAW give identical tracks: " +
-                      ", ".join(path.suffix for path, _ in inputs))
+        checks.append("Prophesee EVT2 and EVT3 .raw and Kairos .raw.kai give identical tracks")
 
         # 3. Decoders hand over fields of packed records (faery: 13-byte
         # t/x/y/on rows, so most x and y values are misaligned in memory).
@@ -141,8 +128,8 @@ def main():
         checks.append("packed, misaligned decoder fields and boolean polarity accepted")
 
         # 4. Bad input is refused with a clear message: packets out of time
-        # order, an unsorted CSV, a CSV with no sensor size, a video file, and
-        # a start time after the last event.
+        # order, a file that is not a raw recording, a missing file, and a
+        # start time after the last event.
         status = {}
         try:
             list(select_packets([ev[:100], ev[:2]], {"width": 320, "height": 240}, 0, 10, None, status))
@@ -150,19 +137,17 @@ def main():
             assert "decreased" in str(exc)
         else:
             raise AssertionError("out-of-order packets accepted")
-        (work / "bad.csv").write_text("x,y,t,p\n40,40,20,1\n40,40,10,-1\n")
-        command("--input", work / "bad.csv", "--width", 320, "--height", 240, "--out", work / "b1",
-                error="nondecreasing")
-        command("--input", work / "ev.csv", "--out", work / "b2", error="sensor width missing")
-        command("--input", "ordinary.mp4", "--out", work / "b3", error="ordinary video")
-        command("--input", work / "ev.npz", "--start", 10, "--out", work / "b4", error="no events")
-        checks.append("out-of-order packets, unsorted CSV, missing dimensions, video and empty selection rejected")
+        (work / "video.mp4").write_bytes(b"not events")
+        command("--input", work / "video.mp4", "--out", work / "b1", error="is not one")
+        command("--input", work / "missing.raw", "--out", work / "b2", error="does not exist")
+        command("--input", work / "ev_evt3.raw", "--start", 10, "--out", work / "b3", error="no events")
+        checks.append("out-of-order packets, non-raw files, missing files and empty selections rejected")
 
         # 5. The interactive runner, with its answers piped in: settings, start,
         # seconds. It must give the same tracks as run.py. The answers start
         # with the UTF-8 byte-order mark that PowerShell puts in front of piped
         # text, so that case is covered too.
-        typed = subprocess.run([sys.executable, str(ROOT / "try_my_data.py"), str(work / "ev.npz"),
+        typed = subprocess.run([sys.executable, str(ROOT / "try_my_data.py"), str(work / "ev.raw.kai"),
                                 "--out", str(work / "typed"), "--no-open"],
                                input=b"\xef\xbb\xbfmoth\n0\n2\n", capture_output=True)
         out_text = typed.stdout.decode(errors="replace") + typed.stderr.decode(errors="replace")

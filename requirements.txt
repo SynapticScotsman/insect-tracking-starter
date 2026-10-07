@@ -5,3 +5,4 @@ numba>=0.57
 pandas>=1.5
 matplotlib>=3.5
 imageio-ffmpeg>=0.4
+faery>=0.7

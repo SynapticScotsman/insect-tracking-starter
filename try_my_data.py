@@ -27,7 +27,7 @@ import pandas as pd
 import run as runner
 
 HERE = Path(__file__).resolve().parent
-FORMATS = (".raw", ".dat", ".npz", ".csv", ".h5", ".hdf5")
+FORMATS = (".raw", ".kai")      # Prophesee .raw, Kairos .raw.kai
 ANIMALS = {
     "moth": "moths and other slow flyers: 12 ms detector, wingbeats 18-80 Hz",
     "bee": "bees: 5 ms detector, wingbeats 120-320 Hz",
@@ -65,7 +65,7 @@ def choose_file(no_dialog: bool) -> Path:
             root.attributes("-topmost", True)
             chosen = filedialog.askopenfilename(
                 title="Choose an event recording",
-                filetypes=[("Event recordings", " ".join("*" + e for e in FORMATS)),
+                filetypes=[("Raw event recordings (.raw, .raw.kai)", " ".join("*" + e for e in FORMATS)),
                            ("All files", "*.*")])
             root.destroy()
             if chosen:
@@ -157,16 +157,13 @@ def main() -> int:
         if not path.is_file():
             p.exit(2, "error: no file at {}\n".format(path))
         if path.suffix.lower() not in FORMATS:
-            print("Note: {} is not one of {}; trying anyway.".format(path.suffix, ", ".join(FORMATS)))
+            p.exit(2, "error: {} is not a .raw or .raw.kai event recording\n".format(path.name))
         print("File: {}".format(path))
         for name, text in ANIMALS.items():
             print("  {:<5} {}".format(name, text))
         preset = ask("Which settings", "moth", str.lower, lambda v: v in runner.PRESETS,
                      "answer one of: " + ", ".join(sorted(runner.PRESETS)))
         width = height = None
-        if path.suffix.lower() == ".csv":
-            width = ask("Sensor width in pixels", 1280, int, lambda v: v > 0, "must be positive")
-            height = ask("Sensor height in pixels", 720, int, lambda v: v > 0, "must be positive")
         start = ask("Start, seconds after the first event", 0.0, float, lambda v: v >= 0,
                     "must be 0 or more")
         duration = ask("Seconds to process (a busy 4 s takes 1-2 minutes)", 4.0, float,
