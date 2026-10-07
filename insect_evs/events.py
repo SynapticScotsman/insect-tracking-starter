@@ -2,12 +2,15 @@
 
 Convention used everywhere in this package:
     x, y   pixel coordinates, origin top-left, int32
-    t      timestamp in MICROSECONDS, int64, monotonically non-decreasing
+    t      timestamp in microseconds (us), int64, non-decreasing
     p      polarity, int8, +1 for ON (brightness increase), -1 for OFF
 
-Timestamps are microseconds because that is what every commercial sensor
-(Prophesee EVT2/EVT3, iniVation AEDAT4) reports natively. Converting to
-seconds early loses precision in float32 after ~10 s of recording.
+Timestamps are kept in microseconds because that is what Prophesee and
+iniVation sensors report. Converting to seconds early loses precision: a
+float32 cannot hold microsecond resolution past about 16 s of recording.
+
+Loaders here return an EventStream in this convention whatever the file
+stored: polarity is mapped to +1/-1 and the events are sorted by time.
 """
 
 from __future__ import annotations
@@ -23,6 +26,10 @@ import numpy as np
 
 @dataclass
 class EventStream:
+    """Events from one sensor as four parallel arrays, plus the sensor size in
+    pixels. The arrays are cast to the dtypes in the module docstring on
+    construction. Methods that index return a new stream; none modify this one.
+    """
     x: np.ndarray
     y: np.ndarray
     t: np.ndarray
@@ -49,15 +56,20 @@ class EventStream:
 
     @property
     def duration_s(self) -> float:
+        """Last timestamp minus first, in seconds. Assumes time order."""
         if len(self) == 0:
             return 0.0
         return float(self.t[-1] - self.t[0]) / 1e6
 
     @property
     def rate_hz(self) -> float:
+        """Mean event rate over the whole stream, events per second."""
         return len(self) / self.duration_s if self.duration_s > 0 else 0.0
 
     def sorted_by_time(self) -> "EventStream":
+        """This stream in time order. Returns the same object when it is
+        already sorted. The sort is stable, so equal timestamps keep their
+        order."""
         if len(self) == 0 or np.all(np.diff(self.t) >= 0):
             return self
         order = np.argsort(self.t, kind="stable")
@@ -70,23 +82,31 @@ class EventStream:
         )
 
     def time_slice(self, t0_us: int, t1_us: int) -> "EventStream":
-        """Half-open slice [t0, t1). Assumes time-sorted (uses searchsorted)."""
+        """Events with t0_us <= t < t1_us. The stream must be time-sorted; on
+        an unsorted stream the result is wrong and no error is raised."""
         i0, i1 = np.searchsorted(self.t, [int(t0_us), int(t1_us)])
         return self.select(slice(i0, i1))
 
     def crop(self, x0: int, y0: int, x1: int, y1: int) -> "EventStream":
-        """Half-open spatial crop. Coordinates are NOT re-based to the crop."""
+        """Events with x0 <= x < x1 and y0 <= y < y1. Coordinates and sensor
+        size stay those of the full sensor; they are not shifted to the crop."""
         m = (self.x >= x0) & (self.x < x1) & (self.y >= y0) & (self.y < y1)
         return self.select(m)
 
     def count_image(self, signed: bool = False) -> np.ndarray:
-        """Accumulate events into an image. Fast path via bincount."""
+        """Events per pixel as a (height, width) float array.
+
+        With signed=True each event adds its polarity, so the image is ON
+        minus OFF. Otherwise every event adds 1.
+        """
         flat = self.y.astype(np.int64) * self.width + self.x.astype(np.int64)
         w = self.p.astype(np.float64) if signed else None
         img = np.bincount(flat, weights=w, minlength=self.width * self.height)
         return img.reshape(self.height, self.width)
 
     def save(self, path: str) -> None:
+        """Write a compressed .npz that load_events reads back exactly.
+        Creates the parent folder if needed."""
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         np.savez_compressed(
             path, x=self.x, y=self.y, t=self.t, p=self.p,
@@ -95,9 +115,14 @@ class EventStream:
 
     @staticmethod
     def concatenate(streams) -> "EventStream":
+        """Join several streams from one sensor into a single time-sorted stream."""
+        # Empty streams are dropped first, so an empty stream at the front
+        # cannot set the sensor size.
         streams = [s for s in streams if len(s) > 0]
         if not streams:
             raise ValueError("nothing to concatenate")
+        # The sensor size comes from the first stream. The others are not
+        # checked against it, so the caller must pass streams from one sensor.
         w, h = streams[0].width, streams[0].height
         out = EventStream(
             np.concatenate([s.x for s in streams]),
@@ -106,6 +131,9 @@ class EventStream:
             np.concatenate([s.p for s in streams]),
             w, h,
         )
+        # The inputs may overlap in time or arrive in any order, so the joined
+        # stream is re-sorted. sorted_by_time uses a stable sort, so events with
+        # equal timestamps keep the order of the input list.
         return out.sorted_by_time()
 
 
@@ -115,26 +143,31 @@ def load_events(
     height: Optional[int] = None,
     encoding: Optional[str] = None,
 ) -> EventStream:
-    """Load events, dispatching on file extension.
+    """Load a whole recording, choosing the reader by file extension.
 
-    Supported: .npz (this package's own format), .h5/.hdf5, .raw/.dat
-    (Prophesee, via expelliarmus), .aedat4 (via dv_processing), .csv.
+    Supported: .npz (this package's own format, see EventStream.save),
+    .h5/.hdf5 (h5py), and through the faery library .raw, .dat, .es, .aedat4,
+    .aedat, .csv and .npy. When faery is not installed or fails on a file,
+    .raw/.dat fall back to expelliarmus, .aedat4 to dv_processing, and
+    .csv/.txt to pandas.
 
-    `encoding` overrides the sniffed Prophesee format (evt2, evt21, evt3, dat).
+    `width` and `height` set the sensor size where the file does not carry it.
+    `encoding` overrides the Prophesee format read from the file header
+    (evt2, evt21, evt3, dat); it applies only to the expelliarmus fallback.
+    For a long recording, load_events_window reads only the part you need.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".npz":
         d = np.load(path)
         return EventStream(d["x"], d["y"], d["t"], d["p"], int(d["width"]), int(d["height"]))
 
-    # HDF5 stays with h5py: faery reports "unsupported file extension" on
-    # Prophesee HDF5, so routing it there would break the main Münster path.
+    # HDF5 goes to h5py, because faery does not read Prophesee HDF5 files.
     if ext in (".h5", ".hdf5"):
         return _load_hdf5(path, width, height)
 
-    # Everything faery handles goes to faery first, so one decoder covers .raw,
-    # .dat, .es, .aedat4, .csv and .npy. The older readers remain as a fallback
-    # when faery is absent or rejects a file.
+    # Every format faery reads goes to faery first, so one decoder covers
+    # .raw, .dat, .es, .aedat4, .csv and .npy. The format-specific readers
+    # below are the fallback when faery is absent or rejects a file.
     if ext in FAERY_EXTENSIONS:
         try:
             return load_events_faery(path)
@@ -157,6 +190,9 @@ def load_events(
 
 
 def _infer_size(x: np.ndarray, y: np.ndarray, width, height) -> Tuple[int, int]:
+    """Sensor size in pixels. A missing width or height is taken as the
+    largest coordinate plus one, which is too small when the edge pixels
+    never fired."""
     if width is None:
         width = int(x.max()) + 1 if len(x) else 1
     if height is None:
@@ -165,6 +201,8 @@ def _infer_size(x: np.ndarray, y: np.ndarray, width, height) -> Tuple[int, int]:
 
 
 def _load_hdf5(path, width, height) -> EventStream:
+    """Read a whole .h5/.hdf5 event file with h5py. `width` and `height`, when
+    given, override any size stored in the file."""
     import h5py
 
     try:
@@ -184,40 +222,50 @@ def _load_hdf5(path, width, height) -> EventStream:
             x, y, t, p = arr["x"], arr["y"], arr["t"], arr["p"]
         else:
             x, y, t = grp["x"][:], grp["y"][:], grp["t"][:]
+            # A file with no polarity field loads as all ON events.
             p = grp["p"][:] if "p" in grp else np.ones(len(x), np.int8)
+        # Sensor size: the caller's value first, then the file's root
+        # attributes. If both are missing, _infer_size below uses the largest
+        # coordinate plus one, which undercounts when the edge pixels are silent.
         width = width or f.attrs.get("width")
         height = height or f.attrs.get("height")
+    # Map any stored polarity (0/1, bool or -1/+1) to this package's +1/-1.
+    # Leaving 0 for OFF would make OFF events count as zero in signed sums.
     p = np.where(np.asarray(p) > 0, 1, -1).astype(np.int8)
     width, height = _infer_size(x, y, width, height)
+    # Timestamps are kept as stored. They must already be in microseconds.
     return EventStream(x, y, t, p, width, height).sorted_by_time()
 
 
-#: Extensions faery decodes. Deliberately excludes .h5: faery raises
-#: "unsupported file extension" on Prophesee HDF5, so h5py remains the only path
-#: for it. Verified against a Münster file, not taken from the documentation.
+#: Extensions sent to faery. .h5 is left out because faery rejects Prophesee
+#: HDF5 files with "unsupported file extension"; h5py reads those instead.
 FAERY_EXTENSIONS = (".raw", ".dat", ".es", ".aedat4", ".aedat", ".csv", ".npy")
 
-#: Timestamps beyond this are microseconds since the Unix epoch rather than since
-#: the start of the recording. AEDAT4 does this. Left uncorrected it survives
-#: int64 but destroys any float32 path, because 24 bits of mantissa cannot hold
-#: 1.7e18 to sub-second precision, so an FFT would silently return nonsense.
+#: A first timestamp above this (about 31 years in us) is taken to count from
+#: the Unix epoch rather than from the start of the recording, as AEDAT4 files
+#: do. Such values fit in int64, but any float32 step, such as an FFT, cannot
+#: resolve them to better than minutes and gives meaningless output. The faery
+#: loader subtracts the first timestamp when it sees one.
 EPOCH_THRESHOLD_US = 10 ** 15
 
 
 def _events_from_ics_dtype(
     t, x, y, on, width=None, height=None
 ) -> Tuple["EventStream", int]:
-    """Convert the ICNS-stack layout to an EventStream. Returns (stream, epoch_offset).
+    """Convert arrays in the layout used by faery and neuromorphic-drivers to
+    an EventStream. Returns (stream, epoch_offset_us).
 
-    The whole ICNS stack (faery, aedat, event_stream, neuromorphic-drivers) shares
-    `[("t","<u8"),("x","<u2"),("y","<u2"),("on","?")]`. Two conversions here are
-    load-bearing:
+    Those libraries store events as `[("t","<u8"),("x","<u2"),("y","<u2"),
+    ("on","?")]`. Two conversions here matter:
 
-    * Polarity is a numpy bool. `on.astype(np.int8)` would give 0/1, which makes
-      every OFF event *neutral* rather than negative and silently halves the
-      contrast of every signed accumulation -- i.e. it would quietly gut the
-      ON-minus-OFF signal the whole wingbeat measurement depends on.
-    * `<u8` becomes int64 by `astype`, never `view`.
+    * Polarity arrives as a bool. Casting it straight to int8 would give 0/1,
+      so every OFF event would count as zero instead of -1 in signed sums.
+      The wingbeat measurement uses the ON minus OFF rate, so OFF must be -1.
+    * Unsigned 64-bit time is converted to int64 by value (`astype`), not by
+      reinterpreting the bytes (`view`).
+
+    If the first timestamp is above EPOCH_THRESHOLD_US it is subtracted from
+    every timestamp, and returned as epoch_offset_us; otherwise the offset is 0.
     """
     t = np.asarray(t).astype(np.int64)
     offset = 0
@@ -236,24 +284,32 @@ def load_events_faery(
     t0_us: Optional[int] = None,
     t1_us: Optional[int] = None,
 ) -> EventStream:
-    """Read any faery-supported format into an EventStream.
+    """Read any format the faery library supports into an EventStream.
 
-    Covers Prophesee `.raw`/`.dat`, `.es`, `.aedat4`, `.csv` and `.npy` through one
-    decoder. Cross-checked against this package's own HDF5 reader on a recording
-    Münster ships in both encodings: 10,073 events over a two-second window agreed
-    byte for byte on timestamp, x, y and polarity, and the y-flip hypothesis
-    matched zero events. So faery's origin, polarity and timestamp conventions are
-    confirmed identical to ours, rather than assumed.
+    Covers Prophesee `.raw`/`.dat`, `.es`, `.aedat4`, `.csv` and `.npy` with one
+    decoder. faery's pixel origin, polarity and timestamp conventions match
+    this package's. On a test recording stored both as Prophesee HDF5 and as
+    .raw, this reader and the HDF5 reader agreed on every event's time, x, y
+    and polarity.
+
+    With `t0_us` and `t1_us`, only events with t0_us <= t < t1_us are kept, and
+    reading stops at the first packet past t1_us. Timestamps that count from
+    the Unix epoch are shifted to start near zero, with a warning.
     """
     import faery
 
     stream = faery.events_stream_from_file(path)
+    # Sensor size, when the format records it. Otherwise it is inferred from
+    # the coordinates.
     dims = None
     try:
         dims = stream.dimensions()
     except Exception:
         pass
 
+    # faery yields packets in time order. Skip packets that end before t0_us,
+    # stop at the first that starts after t1_us, and trim the packets that
+    # straddle either bound.
     xs, ys, ts, ps = [], [], [], []
     for packet in stream:
         if len(packet) == 0:
@@ -297,16 +353,17 @@ def capture_live(
     serial: Optional[str] = None,
     max_events: int = 20_000_000,
 ) -> EventStream:
-    """Capture from a live event camera via neuromorphic-drivers.
+    """Record `duration_s` seconds from a live event camera through the
+    neuromorphic-drivers library. Not used by the rest of this package.
 
-    Supports EVK4, EVK3 HD, SilkyEvCam HD, DVXplorer and DAVIS 346 with no
-    Metavision or libcaer dependency. This is the one thing the file readers
-    cannot do, and it is why the library is worth having despite not reading
-    files at all.
+    The library supports the Prophesee EVK4 and EVK3 HD, the SilkyEvCam HD,
+    and the iniVation DVXplorer and DAVIS 346, without the vendors' own SDKs.
+    `serial` picks one camera when several are connected. Capture stops early,
+    with a warning, after `max_events` events.
 
-    Dropped packets are reported rather than ignored. The driver exposes overflow
-    indices because its ring buffer discards data under load, and a silent gap in
-    the middle of a wingbeat sequence would look exactly like an insect pausing.
+    Dropped data is reported with a warning. The driver's buffer discards
+    packets when the computer cannot keep up, and a gap in the middle of a
+    wingbeat sequence would otherwise look like the insect pausing.
     """
     import neuromorphic_drivers as nd
 
@@ -361,9 +418,11 @@ def sniff_prophesee_encoding(path: str) -> str:
 
     Prophesee `.raw` files begin with '%'-prefixed ASCII header lines carrying
     the format, e.g. `% evt 2.0` or `% format EVT3;height=720;width=1280`.
-    Guessing instead of reading is not safe: the Münster ictrap recordings are
-    EVT2 and decoding them as EVT3 yields garbage rather than an error, because
-    both are valid bit-streams that happen to disagree about what the bits mean.
+    The format must be read, not guessed: decoding an EVT2 file as EVT3 gives
+    wrong events rather than an error, because both are valid bit streams that
+    assign different meanings to the same bits. Returns "evt2", "evt21", "evt3"
+    or "dat". With no recognisable header, a .dat file is "dat" and anything
+    else is assumed to be "evt3".
     """
     ext = os.path.splitext(path)[1].lower()
     with open(path, "rb") as f:
@@ -381,12 +440,17 @@ def sniff_prophesee_encoding(path: str) -> str:
 
 
 def _prophesee_stream(arr, width=None, height=None) -> EventStream:
+    """EventStream from an expelliarmus record array, with polarity mapped to
+    +1/-1. Event order is kept as read."""
     p = np.where(arr["p"] > 0, 1, -1).astype(np.int8)
     width, height = _infer_size(arr["x"], arr["y"], width, height)
     return EventStream(arr["x"], arr["y"], arr["t"], p, width, height)
 
 
 def _load_prophesee(path, encoding: Optional[str] = None) -> EventStream:
+    """Read a whole Prophesee .raw/.dat file with expelliarmus. load_events
+    reaches this only when faery is absent or fails on the file. The sensor
+    size is inferred from the coordinates."""
     from expelliarmus import Wizard
 
     wiz = Wizard(encoding=encoding or sniff_prophesee_encoding(path), fpath=path)
@@ -401,16 +465,20 @@ def load_events_window(
     height: Optional[int] = None,
     encoding: Optional[str] = None,
 ) -> EventStream:
-    """Load only [t0_us, t1_us) from a recording.
+    """Load only the events with t0_us <= t < t1_us from a recording.
 
-    HD recordings at ~1 Mev/s do not fit comfortably in memory, and every
-    analysis here works on windows anyway. For Prophesee files this decodes
-    incrementally and stops once past `t1_us`; for other formats it falls back to
-    a full read and a slice, which is correct but not cheap.
+    An HD sensor can produce a million events per second, so a long recording
+    may not fit in memory. Formats faery reads are decoded packet by packet
+    and reading stops once past `t1_us`. If faery is unavailable, Prophesee
+    .raw/.dat files are decoded in chunks with expelliarmus, also stopping
+    past `t1_us`. Any other format is read whole and then sliced, which gives
+    the same result but uses as much memory as the full recording.
     """
     t0_us, t1_us = int(t0_us), int(t1_us)
     ext = os.path.splitext(path)[1].lower()
 
+    # faery first. Any failure falls through to the readers below, without a
+    # warning.
     if ext in FAERY_EXTENSIONS:
         try:
             return load_events_faery(path, t0_us, t1_us)
@@ -424,6 +492,9 @@ def load_events_window(
 
     from expelliarmus import Wizard
 
+    # Decode in chunks of the requested span, at most 1 s each. Chunks that
+    # end before t0_us are discarded; reading stops at the first chunk that
+    # reaches t1_us, and the joined chunks are trimmed to the exact bounds.
     wiz = Wizard(encoding=encoding or sniff_prophesee_encoding(path), fpath=path)
     step_us = max(int(min(t1_us - t0_us, 1_000_000)), 1)
     wiz.set_time_window(step_us)
@@ -453,6 +524,8 @@ def load_events_window(
 
 
 def _load_aedat4(path) -> EventStream:
+    """Read a whole iniVation .aedat4 file with dv_processing. load_events
+    reaches this only when faery is absent or fails on the file."""
     try:
         import dv_processing as dv
     except ImportError as exc:  # pragma: no cover - depends on optional SDK
@@ -460,7 +533,10 @@ def _load_aedat4(path) -> EventStream:
             "reading .aedat4 needs dv_processing: pip install dv-processing"
         ) from exc
     reader = dv.io.MonoCameraRecording(path)
+    # Sensor size from the recording itself, as (width, height).
     res = reader.getEventResolution()
+    # Read batch by batch until the reader reports the end of the file.
+    # A None batch is skipped and the loop asks again.
     xs, ys, ts, ps = [], [], [], []
     while reader.isRunning():
         batch = reader.getNextEventBatch()
@@ -470,16 +546,23 @@ def _load_aedat4(path) -> EventStream:
         xs.append(a["x"]); ys.append(a["y"]); ts.append(a["timestamp"]); ps.append(a["polarity"])
     if not xs:
         return EventStream(np.array([]), np.array([]), np.array([]), np.array([]), res[0], res[1])
+    # Map the stored polarity to this package's +1/-1.
     p = np.where(np.concatenate(ps) > 0, 1, -1).astype(np.int8)
+    # Timestamps are kept as stored. Unlike the faery path, no Unix-epoch
+    # offset is subtracted here; see EPOCH_THRESHOLD_US.
     return EventStream(
         np.concatenate(xs), np.concatenate(ys), np.concatenate(ts), p, res[0], res[1]
     ).sorted_by_time()
 
 
 def _load_csv(path, width, height) -> EventStream:
+    """Read a .csv or .txt event table with a header row. Needs x, y and t
+    columns; p is optional. The sensor size is inferred when not given."""
     import pandas as pd
 
     df = pd.read_csv(path)
+    # Column names are matched case-insensitively, and "timestamp" and
+    # "polarity" are accepted as names for t and p.
     cols = {c.lower(): c for c in df.columns}
     if "t" not in cols and "timestamp" in cols:
         cols["t"] = cols["timestamp"]
@@ -490,8 +573,12 @@ def _load_csv(path, width, height) -> EventStream:
         raise ValueError("CSV is missing column(s): {}".format(sorted(missing)))
     x = df[cols["x"]].to_numpy()
     y = df[cols["y"]].to_numpy()
+    # t must already be in microseconds. EventStream casts it to int64, so a
+    # column in seconds would lose everything below one second.
     t = df[cols["t"]].to_numpy()
+    # No polarity column: every event loads as ON.
     p = df[cols["p"]].to_numpy() if "p" in cols else np.ones(len(x))
+    # Map 0/1 or -1/+1 polarity to this package's +1/-1.
     p = np.where(p > 0, 1, -1).astype(np.int8)
     width, height = _infer_size(x, y, width, height)
     return EventStream(x, y, t, p, width, height).sorted_by_time()

@@ -1,11 +1,15 @@
 # Read the code in execution order
 
+`HOW_IT_WORKS.md` explains what each algorithm does; this file says where
+each step lives in the code.
+
 0. `try_my_data.py` asks for a file and the settings, then calls `run.run()`
    with them and reads the outputs back. Everything below is the same whether
    you start there or at `run.py`.
 
 1. `run.py: main()` parses the command; `run()` opens the recording, picks the
-   preset (`PRESETS`), and walks the selected time range in back-to-back
+   preset (`PRESETS`) with any `--band`, `--window-ms` or `--max-size` laid
+   over it (`configure`), and walks the selected time range in back-to-back
    windows (`windows_of`). Without `--input` it builds two synthetic insects
    with known wingbeats (`synthetic_events`).
 
@@ -25,8 +29,9 @@
      `analyse_periodicity` (`insect_evs/periodicity.py`) on the track's events:
      the ON-minus-OFF event rate's strongest line (`f0_signed_hz`), its
      strength (`snr_signed_db`), and the period estimator (`f0_yin_hz`).
-   - The octave check: candidate wingbeats are the signed line, half and a
-     third of it, and the period estimate, inside the preset's band.
+   - Which multiple of the stroke rate is the true wingbeat: the candidates
+     are the signed line, half and a third of it, and the period estimate,
+     inside the preset's band.
      `pose_autocorr` measures how strongly the animal's spatial ON/OFF event
      pattern repeats after each candidate period (`descriptor.py`), and
      `pick_fundamental` takes the shortest period that repeats about as well
@@ -37,8 +42,8 @@
      test cannot tell them apart, the signed line's number is reported, not
      whichever of the two reads higher.
    - `lamp_lock` measures each track's lock to the scene's mains flicker.
-   - `_verdict` calls a track `wingbeat` when its line is strong (10 dB) and it
-     lasts at least ten strokes.
+   - `_verdict` calls a track `wingbeat` when its line is strong (10 dB), its
+     period settled, and it lasts at least ten strokes.
 
 4. Back in `run.py`, `stroke_times` finds each wing stroke from the track's ON
    events: band-passed at 0.5-1.5 times the wingbeat, peaks at least 0.75 of a

@@ -31,6 +31,7 @@ FORMATS = (".raw", ".dat", ".npz", ".csv", ".h5", ".hdf5")
 ANIMALS = {
     "moth": "moths and other slow flyers: 12 ms detector, wingbeats 18-80 Hz",
     "bee": "bees: 5 ms detector, wingbeats 120-320 Hz",
+    "wide": "unknown flyers: 8 ms detector, wingbeats 15-500 Hz",
 }
 
 
@@ -51,8 +52,12 @@ def ask(question, default, cast=str, ok=lambda v: True, why=""):
 
 
 def choose_file(no_dialog: bool) -> Path:
+    """A file dialog when one can be shown, otherwise a typed path."""
     if not no_dialog:
         try:
+            # tkinter ships with most Python installs. The hidden root window
+            # is needed to host the dialog; topmost keeps the dialog from
+            # opening behind the terminal.
             import tkinter as tk
             from tkinter import filedialog
             root = tk.Tk()
@@ -68,6 +73,7 @@ def choose_file(no_dialog: bool) -> Path:
             print("No file chosen in the dialog.")
         except Exception as exc:          # no tkinter, or no display to show it on
             print("(No file dialog available here: {})".format(exc))
+    # Quotes are stripped because "Copy as path" in Windows Explorer adds them.
     while True:
         text = input("Path to the event recording: ").strip().strip('"').strip("'")
         if not text:
@@ -97,6 +103,9 @@ def summarise(out: Path, preset: str) -> None:
         return
     print("Wingbeat across tracks, p10 / p50 / p90: {:.1f} / {:.1f} / {:.1f} Hz".format(
         *np.percentile(wb.f0_wingbeat_hz, [10, 50, 90])))
+    # Per track, the median of its per-stroke rates and its number of
+    # intervals. Track IDs restart in each window, so the key is the pair
+    # (window_start_s, track_id).
     per = strokes.groupby(["window_start_s", "track_id"]).stroke_rate_hz
     wb = wb.join(per.median().rename("stroke_median_hz"), on=["window_start_s", "track_id"])
     wb = wb.join(per.size().rename("intervals"), on=["window_start_s", "track_id"])
@@ -105,6 +114,7 @@ def summarise(out: Path, preset: str) -> None:
     print("\nLongest {} of {} wingbeat tracks:".format(len(show), len(wb)))
     print("  {:>9} {:>6} {:>10} {:>12} {:>10} {:>14} {:>9}".format(
         "window s", "track", "length ms", "wingbeat Hz", "from", "per-stroke Hz", "strokes"))
+    # A track with no measured stroke shows "-"; strokes = intervals + 1.
     for _, r in show.iterrows():
         print("  {:>9.3f} {:>6d} {:>10.0f} {:>12.1f} {:>10} {:>14} {:>9}".format(
             r.window_start_s, int(r.track_id), r.duration_ms, r.f0_wingbeat_hz, r.fundamental_from,
@@ -115,6 +125,7 @@ def summarise(out: Path, preset: str) -> None:
 
 
 def open_file(path: Path) -> None:
+    """Open a file in the system's default viewer (Windows, macOS or Linux)."""
     try:
         if sys.platform.startswith("win"):
             os.startfile(str(path))              # noqa: S606 (the user's own output)
@@ -127,15 +138,17 @@ def open_file(path: Path) -> None:
 
 
 def main() -> int:
+    """Ask for the file and settings, run, then summarise the outputs."""
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("input", nargs="?", type=Path, help="event recording; omit to be asked")
     p.add_argument("--no-dialog", action="store_true", help="type the path instead of a dialog")
     p.add_argument("--out", type=Path, help="output folder (default: outputs/NAME_PRESET_STARTs)")
     p.add_argument("--no-open", action="store_true", help="do not offer to open the figure")
     a = p.parse_args()
-    # PowerShell pipes text with a UTF-8 byte-order mark in front, so a piped
-    # "bee" arrived as "﻿bee" (or "ï»¿bee" read as cp1252) and the first
-    # answer was refused. utf-8-sig drops the mark; a terminal is left alone.
+    # Answers can be piped in instead of typed. PowerShell puts a UTF-8
+    # byte-order mark in front of piped text, which would spoil the first
+    # answer; reading piped input as utf-8-sig drops it. Typing at a
+    # terminal is unaffected.
     if not sys.stdin.isatty():
         sys.stdin.reconfigure(encoding="utf-8-sig", errors="replace")
     try:

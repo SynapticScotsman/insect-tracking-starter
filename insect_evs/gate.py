@@ -1,6 +1,13 @@
-"""PeriodicityGate and its config, lifted verbatim from
-src/insect_evs/classify.py (export_starter.py). classify.py is not copied
-whole: it imports the dataset-annotation package for label scoring."""
+"""Wingbeat test for every track.
+
+PeriodicityGate measures the periodicity features of each track's events
+(see `periodicity.analyse_periodicity`) and checks them against the
+thresholds in GateConfig. A track is accepted when it passes every test:
+a clear spectral line, a steady phase, harmonics, a fundamental inside the
+wingbeat band, enough cycles and events, little power below 20 Hz, and no
+phase locking to the rest of the scene, which would point to a flickering
+lamp.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,64 +23,76 @@ from .track import Track
 
 @dataclass
 class GateConfig:
-    """Default thresholds.
+    """Thresholds for the wingbeat test. The note under each field says what
+    it tests.
 
-    These were chosen on synthetic scenes to sit in the *gap* between insect and
-    clutter distributions with roughly a factor of two of margin on each side,
-    not at the edge of either. They are a starting point and nothing more: real
-    scenes will have lower SNR, and the honest workflow is to record labelled
-    field tracks and call `fit_thresholds`. Check `bench` across seeds before
-    trusting any change to these.
+    The defaults were set on synthetic scenes, in the gap between insect and
+    clutter values with about a factor of two of margin on each side. Treat
+    them as a starting point. Real recordings have lower signal-to-noise
+    ratios, so check the thresholds against tracks you have labelled by eye
+    from your own recordings before relying on them. `min_plv` in particular
+    is too strict for real insects; see its note.
     """
 
     min_snr_db: float = 10.0
-    """Line must stand this far above the local noise floor. A wingbeat at close
-    range gives 25-35 dB on synthetic scenes; in-band clutter transients rarely
-    exceed 11 dB. Lower this for distant or low-contrast targets, but note that
-    below about 6 dB the f0 estimate is too loose for identity work anyway."""
+    """The spectral line at the fundamental must stand this many dB above the
+    local noise floor. A close wingbeat gives 25 to 35 dB on synthetic scenes,
+    and short clutter transients in the same band rarely exceed 11 dB. Lower
+    it for distant or low-contrast insects, but below about 6 dB the frequency
+    estimate is too loose to tell one individual from another."""
 
     min_plv: float = 0.50
-    """DOES NOT TRANSFER TO REAL DATA AT THIS VALUE. Measured on Münster
-    recordings, real insect tracks carrying 21-31 dB spectral lines score PLV
-    around 0.2-0.3, so this threshold rejects almost every genuine target. It was
-    calibrated on synthetic scenes where the simulated insect is a perfect
-    oscillator and scores 1.00. Re-fit before using outdoors, and see
-    `periodicity.phase_locking_value` for why the measure behaves differently on
-    wild animals than on a simulation."""
+    """Smallest phase-locking value (PLV): how steady the wing phase stays from
+    cycle to cycle, from 0 to 1. Too strict for real insects at this value. A
+    simulated wing is a perfect oscillator and scores 1.0, but real insects
+    with strong spectral lines (21 to 31 dB) score around 0.2 to 0.3, so this
+    default rejects almost all of them. Lower it for field data; census.py
+    sets it to 0. `periodicity.phase_locking_value` explains why real animals
+    score lower than a simulation."""
 
     min_harmonic_ratio: float = 0.12
-    """A wing is a non-sinusoidal mechanical oscillator and always has harmonics.
-    Clutter transients and single-tone interference generally do not."""
+    """Smallest share of the in-band power at the harmonics of the
+    fundamental. A wing stroke is not a pure sine wave, so it always has
+    harmonics. Clutter transients and single-tone interference generally do
+    not."""
 
     max_scene_coherence: float = 0.60
-    """Reject tracks phase-locked to the rest of the scene at their own f0. This
-    is the artificial-light test: mains flicker at 100/120 Hz sits inside the
-    wingbeat band and passes every other criterion here, so without this check a
-    lit hedge is indistinguishable from a swarm. See
-    `periodicity.cross_phase_locking` for why the threshold cannot be pushed much
-    below 0.5 on short tracks."""
+    """Largest phase locking between the track and the rest of the scene at
+    the track's own fundamental. This is the artificial-light test: mains
+    flicker at 100 or 120 Hz lies inside the wingbeat band and passes every
+    other test, so without this check a lit hedge looks like a swarm.
+    `periodicity.cross_phase_locking` explains why the threshold cannot go
+    much below 0.5 on short tracks."""
 
     max_low_freq_ratio: float = 0.85
-    """Reject tracks whose power is overwhelmingly below 20 Hz: that is wind."""
+    """Largest share of power below 20 Hz. A track with more is swaying
+    vegetation moved by wind."""
 
     min_cycles: float = 20.0
-    """Twenty cycles is roughly 100 ms at 200 Hz. Below that, both the frequency
-    estimate and the phase-locking value become unreliable in the same direction
-    (both look better than they are), so short clutter fragments are the dominant
-    false positive. This is the threshold that removes them."""
+    """Fewest wing cycles the track must span: 20 cycles is about 100 ms at
+    200 Hz. On shorter tracks the frequency estimate and the phase-locking
+    value both look better than they are, so short clutter fragments pass
+    the other tests. This threshold removes them."""
 
     min_events: int = 200
     fmin_hz: float = 40.0
     fmax_hz: float = 400.0
+    """`min_events` is the fewest events a track may have. `fmin_hz` and
+    `fmax_hz` bound the band, in Hz, searched for the fundamental."""
 
     require_octave_agreement: bool = False
-    """Strict mode: also demand that the unsigned peak sit at 2*f0. High precision,
-    but it costs recall on tracks viewed along the stroke plane, where the ON/OFF
-    asymmetry that carries the fundamental largely cancels."""
+    """Strict mode: also require the unsigned spectral peak to sit at twice the
+    fundamental. Fewer false accepts, but it loses insects seen edge-on to the
+    stroke plane, where the ON/OFF difference that carries the fundamental
+    largely cancels."""
 
 
 @dataclass
 class TrackResult:
+    """The gate's verdict on one track: its features, whether it was
+    accepted, the weakest-link score, and the names of the tests it failed.
+    `truth_label` and `truth_purity` are for callers that score against
+    labelled data; the gate leaves them unset."""
     track: Track
     features: PeriodicityFeatures
     accepted: bool
@@ -88,11 +107,13 @@ class TrackResult:
 
 
 def _margins(f: PeriodicityFeatures, cfg: GateConfig) -> Dict[str, float]:
-    """Normalised distance past each threshold. Negative means the test failed.
+    """Distance past each threshold, in scaled units. Negative means the test
+    failed.
 
-    The scales in the denominators set how these trade off against each other in
-    the combined score; they are rough units of "one meaningful step" in each
-    quantity, not fitted values.
+    Each denominator is a rough size of one meaningful step in that quantity,
+    for example 6 dB of line strength or 5 cycles. They set how the tests
+    compare in the combined score. They are chosen by hand, not fitted. A
+    track with no fundamental gets -inf for the band test.
     """
     return {
         "snr": (f.peak_snr_db - cfg.min_snr_db) / 6.0,
@@ -108,11 +129,13 @@ def _margins(f: PeriodicityFeatures, cfg: GateConfig) -> Dict[str, float]:
 
 
 def gate_score(f: PeriodicityFeatures, cfg: GateConfig) -> Tuple[float, List[str]]:
-    """Weakest-link score: the smallest margin across all criteria.
+    """Weakest-link score: the smallest margin across all tests. Returns
+    (score, names of the failed tests).
 
-    Taking the minimum rather than a sum means a track cannot buy its way past a
-    failed criterion with a large margin elsewhere, which is exactly the
-    behaviour you want when one criterion encodes "this is not wind".
+    The minimum is used rather than a sum so that a large margin on one test
+    cannot make up for failing another. A track that fails the wind test, for
+    example, is rejected however strong its spectral line. Any test that
+    fails with a margin of -inf makes the score -inf.
     """
     m = _margins(f, cfg)
     if cfg.require_octave_agreement and not f.octave_agreement:
@@ -126,10 +149,14 @@ def gate_score(f: PeriodicityFeatures, cfg: GateConfig) -> Tuple[float, List[str
 
 
 class PeriodicityGate:
+    """Accept or reject tracks on their wingbeat periodicity. Uses the
+    default GateConfig unless one is given."""
     def __init__(self, config: Optional[GateConfig] = None):
         self.config = config or GateConfig()
 
     def evaluate(self, features: PeriodicityFeatures) -> Tuple[bool, float, List[str]]:
+        """(accepted, score, failed tests) for one track's features. Accepted
+        means the weakest-link score is at least 0."""
         score, reasons = gate_score(features, self.config)
         return (score >= 0.0), score, reasons
 
@@ -141,6 +168,13 @@ class PeriodicityGate:
         bin_us: int = 200,
         check_scene_coherence: bool = True,
     ) -> List[TrackResult]:
+        """Measure periodicity features for every track and score each against
+        the config. Returns one TrackResult per track, in input order.
+
+        `ev` is the stream the tracks were built from. `bin_us` is the rate-signal
+        bin in microseconds, and `pad_px` grows each detection box when picking
+        a track's events. `check_scene_coherence=False` skips the lamp test and
+        leaves `scene_coherence` at whatever analyse_periodicity set."""
         if len(ev) == 0 or not tracks:
             return []
 
@@ -154,22 +188,35 @@ class PeriodicityGate:
 
         results = []
         for trk in tracks:
+            # The track's events: those inside any of its detection boxes,
+            # grown by pad_px pixels, during that detection's time window.
             mask = trk.event_mask(ev, pad_px=pad_px)
             sub = ev.select(mask)
+            # Spectral line, YIN, phase locking, harmonics and the rest, with
+            # the fundamental searched only inside the config's band in Hz.
             feats = analyse_periodicity(
                 sub, bin_us=bin_us, fmin_hz=self.config.fmin_hz, fmax_hz=self.config.fmax_hz
             )
 
+            # Lamp test, only when there is an f0 to test at. The track's rate
+            # is binned on the scene's own time base, so it lines up bin for bin
+            # with scene_signed and the subtraction is exact.
             if check_scene_coherence and np.isfinite(feats.f0_hz):
                 _, _, trk_full = rate_signals(sub, bin_us=bin_us, t0_us=t0_us, t1_us=t1_us)
                 background = scene_signed - trk_full
+                # Compare only the bins inside the track's lifetime. Outside it
+                # the track's rate is zero and would carry no phase.
                 i0 = max(int((trk.t_start_us - t0_us) // bin_us), 0)
                 i1 = min(int((trk.t_end_us - t0_us) // bin_us) + 1, len(scene_signed))
+                # At least 32 bins, 6.4 ms at the default 200 us bin. A shorter
+                # track keeps the scene_coherence analyse_periodicity gave it.
                 if i1 - i0 >= 32:
                     feats.scene_coherence = cross_phase_locking(
                         trk_full[i0:i1], background[i0:i1], fs, feats.f0_hz
                     )
 
+            # Weakest-link score over every criterion; accepted when it is >= 0.
+            # `reasons` names each criterion the track failed.
             accepted, score, reasons = self.evaluate(feats)
             results.append(TrackResult(trk, feats, accepted, score, reasons))
         return results

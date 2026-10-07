@@ -1,38 +1,42 @@
-"""Wingbeat periodicity: the clutter filter and the front end for identity (O3.1).
+"""Wingbeat periodicity of one insect track.
 
-The claim the whole approach rests on: in a meadow, an insect is close to the
-only thing that modulates a pixel periodically at 100-250 Hz. Wind-driven
-foliage is aperiodic and band-limited below roughly 20 Hz. So the separable axis
-is not brightness, size, speed or event count, all of which overlap heavily; it
-is the presence of a stable spectral line with harmonic structure and a phase
-that stays locked over many cycles.
+The method rests on one observation. In a field scene, a flying insect is close
+to the only thing that modulates a pixel periodically at 100-250 Hz. Foliage
+moved by wind is aperiodic and carries little power above about 20 Hz.
+Brightness, size, speed and event count all overlap heavily between insects and
+clutter. What separates them is a stable spectral line in the wingbeat band,
+with harmonics, whose phase stays locked over many cycles.
 
-Three measurements, deliberately not one:
+The module reports three measurements of that, kept separate:
 
   peak_snr_db      Is there a line in the band, above the local noise floor?
-                   On real Münster recordings this is the STRONGEST of the three
-                   (AUC 0.79 against size-matched background patches).
-  harmonic_ratio   Does it have harmonics? A wingbeat is a non-sinusoidal
+                   The strongest of the three on field recordings: AUC 0.79
+                   against size-matched background patches. AUC is the area
+                   under the ROC curve; 0.5 is chance and 1.0 is perfect.
+  harmonic_ratio   Does the line have harmonics? A wingbeat is a non-sinusoidal
                    mechanical oscillation and always does. Narrowband
-                   interference usually does not. Second strongest on real data
-                   (AUC 0.75).
+                   interference usually does not. AUC 0.75.
   plv              Is the phase locked while the animal is beating its wings?
-                   Weakest on real data (AUC 0.64), for reasons documented in
-                   `phase_locking_value`: a wild insect's wingbeat is
-                   intermittent over a multi-second track, so this measure is
-                   far less decisive outdoors than on synthetic scenes, where it
-                   looked perfect. Corroborating evidence, not a gate.
+                   The weakest, AUC 0.64, because a wild insect's wingbeat is
+                   intermittent over a track of several seconds. See
+                   `phase_locking_value`. Treat it as supporting evidence, not
+                   as a gate on its own.
 
-Reporting all three, rather than a single fused score, is what lets you say
-which property failed when a track is rejected in the field. It is also what
-made the disagreement above visible: a single fused score would have hidden the
-fact that the criterion trusted most was the one that transferred worst.
+Three numbers instead of one fused score means a rejected track can be traced
+to the property that failed.
 
-ON/OFF and the factor of two. A wing sweeps fastest at mid-stroke, so the
-unsigned event rate peaks twice per cycle (energy at 2*f0), while polarity
-reverses once per cycle (signed rate carries f0). `analyse_periodicity` estimates
-both and cross-checks them, because taking the unsigned peak at face value gives
-you an octave error, and an octave error in f0 is fatal to identity work.
+ON/OFF polarity and the factor of two. A wing sweeps fastest at mid-stroke, in
+both directions, so the unsigned event rate peaks twice per wing cycle and
+carries most of its energy at 2*f0. Polarity reverses once per cycle, so the
+signed rate, ON count minus OFF count, carries f0 itself. Taking the unsigned
+peak at face value gives an octave error: a frequency twice the true wingbeat.
+An octave error makes any comparison between individuals meaningless, so
+`analyse_periodicity` estimates both and cross-checks them.
+
+The bundled pipeline calls `rate_signals`, `analyse_periodicity`,
+`cross_phase_locking`, `phase_track` and `half_cycle_similarity`.
+`instantaneous_frequency`, `autocorrelation` and `lomb_scargle_peak` are not
+called by it and are kept as stand-alone tools.
 """
 
 from __future__ import annotations
@@ -46,30 +50,32 @@ from scipy.ndimage import uniform_filter1d
 
 from .events import EventStream
 
-#: Default search band. Covers Hymenoptera and Diptera (roughly 100-250 Hz) with
-#: headroom for slower Lepidoptera at the bottom and small Diptera at the top.
-#: Narrow it to your taxa if you know them: a narrower band is a stronger filter.
+#: Default search band in Hz. Covers bees, wasps and flies (roughly 100-250 Hz)
+#: with room for slower moths and butterflies at the bottom and small flies at
+#: the top. Narrow it to your taxa if you know them: a narrower band rejects
+#: more clutter.
 DEFAULT_FMIN_HZ = 40.0
 DEFAULT_FMAX_HZ = 400.0
 
-#: Above this frequency, vegetation has essentially no power. Energy below it is
-#: the signature of wind, not wings.
+#: Vegetation moved by wind has almost no power above this frequency, in Hz.
+#: Power below it is the signature of wind, not wings.
 CLUTTER_FMAX_HZ = 20.0
 
 
 @dataclass
 class PeriodicityFeatures:
-    """Everything `analyse_periodicity` measures about one track."""
+    """Everything `analyse_periodicity` measures about one track.
+
+    Frequencies are in Hz, SNRs in dB, durations in seconds. Defaults are the
+    values meaning "nothing measured": nan frequencies, -inf SNR, zero locking.
+    """
 
     f0_hz: float = np.nan
     peak_snr_db: float = -np.inf
     peak_snr_signed_db: float = -np.inf
-    """SNR at f0_signed_hz specifically, not at the reconciled f0_hz. peak_snr_db
-    is evaluated at whatever `_reconcile_fundamental` settled on, which can be a
-    YIN estimate; a countable-track gate on that number inherits every YIN
-    corruption of the fundamental. This field never moves regardless of how f0
-    was reconciled, so a gate built on it stays at the frequency the census
-    actually reports (2026-08 review finding #4)."""
+    """Line strength in dB at f0_signed_hz itself. peak_snr_db is measured at
+    f0_hz, which may have come from YIN; this one always tests the spectral
+    line, so a threshold on it judges the frequency the census reports."""
     harmonic_ratio: float = 0.0
     plv: float = 0.0
     low_freq_ratio: float = 1.0     # power below CLUTTER_FMAX_HZ / total power
@@ -80,23 +86,22 @@ class PeriodicityFeatures:
     yin_confidence: float = 0.0
     octave_agreement: bool = False  # unsigned peak sits at ~2x the signed peak
     octave_corrected: bool = False
-    """True when the spectral peak was an integer multiple of the YIN period and
-    was overridden. Worth counting across a dataset: a high rate means the
-    spectral estimator alone would have been folding waveforms at the wrong
-    rate."""
+    """True when the spectral peak was a whole multiple of the YIN frequency
+    and YIN's value replaced it in f0_hz."""
 
     fundamental_source: str = "none"
-    """One of: yin, spectral, spectral+yin, unsigned/2, none."""
+    """Which estimate f0_hz came from: yin, spectral, spectral+yin,
+    unsigned/2, or none."""
     scene_coherence: float = 0.0
     """Phase locking between this track and the rest of the scene at f0. High
-    means a common driver, i.e. artificial light rather than an animal. Only
-    populated when the gate is given scene context; 0 otherwise."""
+    means a shared driver such as a flickering lamp rather than an animal.
+    This package does not compute it, so it stays 0."""
 
     n_events: int = 0
     duration_s: float = 0.0
-    n_cycles: float = 0.0
+    n_cycles: float = 0.0            # wing cycles in the track: f0_hz * duration_s
     freq_resolution_hz: float = np.nan
-    polarity_balance: float = 0.0
+    polarity_balance: float = 0.0   # (ON - OFF) / all events, from -1 to +1
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -110,18 +115,22 @@ def rate_signals(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Bin a track's events into unsigned and signed rate signals.
 
-    Returns (t_s, unsigned, signed) where t_s is the bin centre in seconds.
+    Returns (t_s, unsigned, signed). t_s is each bin centre in seconds.
+    unsigned is the event count per bin. signed is ON count minus OFF count
+    per bin. t0_us and t1_us fix the time span in microseconds, so several
+    tracks can share one grid; by default the span is the track's own.
 
-    `bin_us` sets the Nyquist limit: 200 us gives fs = 5 kHz, so harmonics up to
-    2.5 kHz are representable, which is ample for a 250 Hz fundamental. Do not
-    coarsen much beyond 500 us or you start aliasing the third harmonic of a fast
-    flier back into the band you are searching.
+    `bin_us` sets the sample rate and so the Nyquist limit. 200 us gives
+    fs = 5 kHz, so frequencies up to 2.5 kHz are representable, ample for a
+    250 Hz fundamental and its harmonics. Do not coarsen much beyond 500 us,
+    or the third harmonic of a fast flier aliases back into the search band.
     """
     if len(ev) == 0:
         return np.zeros(0), np.zeros(0), np.zeros(0)
     t0 = int(ev.t[0]) if t0_us is None else int(t0_us)
     t1 = int(ev.t[-1]) + 1 if t1_us is None else int(t1_us)
     n_bins = max(int(np.ceil((t1 - t0) / bin_us)), 1)
+    # Events outside [t0, t1) are clipped into the first or last bin.
     idx = np.clip((ev.t - t0) // bin_us, 0, n_bins - 1).astype(np.int64)
     unsigned = np.bincount(idx, minlength=n_bins).astype(np.float64)
     signed = np.bincount(idx, weights=ev.p.astype(np.float64), minlength=n_bins)
@@ -130,11 +139,13 @@ def rate_signals(
 
 
 def _detrend_highpass(sig: np.ndarray, fs: float, cutoff_hz: float) -> np.ndarray:
-    """Remove the slow envelope from translation, occlusion and range change.
+    """Remove the slow envelope caused by translation, occlusion and range change.
 
     Without this, a track that simply gets brighter as the insect approaches has
-    a huge DC-adjacent component that dominates the periodogram and depresses the
-    apparent SNR of the real line.
+    a large component near 0 Hz that dominates the spectrum and lowers the
+    apparent SNR of the real line. The filter is a 2nd-order Butterworth high
+    pass at `cutoff_hz`, run forwards and backwards so it adds no phase lag.
+    Signals shorter than 30 samples only have their mean removed.
     """
     sig = sig - sig.mean()
     nyq = fs / 2.0
@@ -150,7 +161,12 @@ def _detrend_highpass(sig: np.ndarray, fs: float, cutoff_hz: float) -> np.ndarra
 
 
 def _psd(sig: np.ndarray, fs: float, df_target_hz: float = 8.0):
-    """Welch PSD with a segment length chosen for the requested resolution."""
+    """Welch power spectral density at about `df_target_hz` resolution.
+
+    The segment length is the power of two nearest fs / df_target_hz, at least
+    32 samples and at most the signal length. Averaging half-overlapping
+    segments gives a stable noise floor. Returns (freqs_hz, psd, resolution_hz).
+    """
     nperseg = int(min(len(sig), max(64, 2 ** int(np.ceil(np.log2(fs / df_target_hz))))))
     nperseg = max(nperseg, 32)
     if nperseg > len(sig):
@@ -163,11 +179,16 @@ def _psd(sig: np.ndarray, fs: float, df_target_hz: float = 8.0):
 
 
 def _fine_peak(sig: np.ndarray, fs: float, fmin: float, fmax: float, zero_pad: int = 8):
-    """Zero-padded FFT peak with parabolic interpolation, for a precise f0.
+    """Strongest frequency in [fmin, fmax] Hz, located to a fraction of a bin.
 
-    Welch is the right tool for a robust noise floor but its resolution is set by
-    the segment length. Individual identification needs f0 to a fraction of a
-    hertz, so the peak location is refined here on the full-length transform.
+    The Welch spectrum gives a stable noise floor, but its resolution is set by
+    the segment length, about 8 Hz here. Comparing individuals needs f0 to a
+    fraction of a hertz, so the peak is found on a Hann-windowed FFT of the
+    whole signal, zero-padded `zero_pad` times, then refined by fitting a
+    parabola to the log power of the peak bin and its two neighbours.
+
+    Returns (f_peak_hz, power at the peak bin), or (nan, nan) if the signal is
+    shorter than 16 samples or the band holds no bins.
     """
     n = len(sig)
     if n < 16:
@@ -181,6 +202,8 @@ def _fine_peak(sig: np.ndarray, fs: float, fmin: float, fmax: float, zero_pad: i
         return np.nan, np.nan
     sub = np.where(band)[0]
     k = sub[int(np.argmax(spec[sub]))]
+    # Vertex of the parabola through three log-power points, as an offset in
+    # bins from k, limited to half a bin either way.
     if 0 < k < len(spec) - 1:
         a, b, c = np.log(spec[k - 1] + 1e-30), np.log(spec[k] + 1e-30), np.log(spec[k + 1] + 1e-30)
         denom = a - 2 * b + c
@@ -193,49 +216,75 @@ def _fine_peak(sig: np.ndarray, fs: float, fmin: float, fmax: float, zero_pad: i
 
 
 def _line_snr_db(freqs, psd, f_line, exclude_hz=None, band=None) -> float:
-    """Power at a spectral line relative to the median floor around it."""
+    """Power at a spectral line relative to the median floor around it, in dB."""
+    # No line to measure scores -inf, so it fails any SNR threshold.
     if not np.isfinite(f_line):
         return -np.inf
+    # Default floor region: every positive frequency, which leaves out the DC bin.
     if band is None:
         band = (freqs > 0)
+    # Half-width of the line in Hz: 3 Hz or 5% of the line, whichever is wider.
+    # It sets both where the peak is looked for and what is kept out of the floor.
     if exclude_hz is None:
         exclude_hz = max(3.0, 0.05 * f_line)
+    # The peak is the highest PSD bin within exclude_hz of the line, so a line
+    # that falls between bins still finds its strongest bin.
     near = np.abs(freqs - f_line) <= exclude_hz
     if not near.any():
         return -np.inf
     peak = float(psd[near].max())
     # Floor: everything in band that is not this line or one of its harmonics.
     floor_mask = band.copy()
+    # Harmonics 1 to 5 are removed, each with the same half-width.
     for h in range(1, 6):
         floor_mask &= np.abs(freqs - h * f_line) > exclude_hz
+    # On a coarse frequency grid the harmonic cut can leave almost nothing.
+    # Then fall back to removing the line alone, and give up below 4 bins.
     if floor_mask.sum() < 4:
         floor_mask = band & ~near
     if floor_mask.sum() < 4:
         return -np.inf
+    # The median, not the mean, so a few other strong lines in the band move
+    # the floor little.
     floor = float(np.median(psd[floor_mask]))
     if floor <= 0:
         return np.inf
+    # PSD is power, so the ratio converts to dB with 10 log10.
     return float(10.0 * np.log10(peak / floor))
 
 
 def _plv_segment(sig: np.ndarray, fs: float, f0: float, cycles: float) -> float:
-    """Resultant length of the demodulated phase over one segment."""
+    """Phase locking at f0 over one segment, from 0 (random) to 1 (locked)."""
     n = len(sig)
     if n < 16:
         return np.nan
+    # Complex demodulation. Multiplying by exp(-2 pi i f0 t) moves the f0
+    # component to 0 Hz, so its phase relative to a fixed f0 reference shows
+    # up as the angle of z. Time t is in seconds from the segment start.
     t = np.arange(n) / fs
     z = sig.astype(np.float64) * np.exp(-2j * np.pi * f0 * t)
+    # Smoothing window: `cycles` periods of f0, in samples, at least 3.
+    # If that is longer than the segment, use a third of the segment instead.
     win = int(max(3, round(cycles * fs / f0)))
     if win >= n:
         win = max(3, n // 3)
+    # A moving average of the real and imaginary parts is a low-pass filter.
+    # It suppresses the image at twice f0 and leaves the slowly changing
+    # amplitude and phase of the f0 component.
     zs = uniform_filter1d(z.real, win) + 1j * uniform_filter1d(z.imag, win)
+    # Drop half a window at each end, where the average runs past the data.
+    # Kept only if more than 8 samples remain.
     edge = win // 2
     if n - 2 * edge > 8:
         zs = zs[edge:n - edge]
+    # Samples with almost no f0 amplitude, under 5% of the median, have no
+    # meaningful phase and are left out.
     mag = np.abs(zs)
     good = mag > (1e-12 + 0.05 * np.median(mag))
     if good.sum() < 8:
         return np.nan
+    # Mean of the unit phasors. 1 means the phase held constant over the
+    # segment; near 0 means it wandered all the way round.
     return float(np.abs(np.mean(zs[good] / mag[good])))
 
 
@@ -246,36 +295,29 @@ def phase_locking_value(
     cycles: float = 3.0,
     window_cycles: Optional[float] = 25.0,
 ) -> float:
-    """Consistency of the instantaneous phase at f0, measured over short windows.
+    """How steady the phase at f0 is, as the median over short windows.
 
-    Complex demodulation: multiply by exp(-2*pi*i*f0*t), smooth over a few cycles,
-    then take the resultant length of the unit phasors.
+    Returns a value from 0 (phase random) to 1 (phase fixed). Each window of
+    `window_cycles` wing cycles is complex-demodulated at f0, smoothed over
+    `cycles` cycles, and scored as the resultant length of its unit phasors.
+    See `_plv_segment`.
 
-    MEASURED ON REAL DATA, AND IT CHANGED THE DESIGN. Computing this across a
-    whole track, as this function originally did, returns near zero for real
-    insects that carry an obvious 25 dB spectral line: on Münster tracks the
-    whole-track value was 0.03 to 0.23 while the same tracks scored 21 to 31 dB
-    peak SNR. The cause is not frequency drift in the gentle sense. Across a
-    multi-second track a wild insect's wingbeat is intermittent: it lands, turns,
-    is occluded, or leaves the annotation box, and the phase reference is lost at
-    every interruption. Integrating through those gaps converts a real oscillator
-    into apparent noise.
+    Why short windows. Over a track of several seconds a wild insect's
+    wingbeat is intermittent: it lands, turns, is occluded, or leaves the
+    tracked box, and the phase reference is lost at each interruption.
+    Integrated over the whole track, insects with an obvious 20-30 dB spectral
+    line score only 0.03 to 0.23. A window of 25 cycles asks whether the phase
+    is locked while the animal is beating its wings, which is the question
+    that can be answered.
 
-    So the phase is measured over `window_cycles` at a time and the median is
-    returned, which asks the answerable question ("is the phase locked while the
-    animal is beating its wings") rather than the unanswerable one ("has it been
-    locked continuously for eighteen seconds").
+    Bias. Short windows push the value up. With k independent smoothing
+    windows in a segment, uncorrelated noise still scores about 1/sqrt(k),
+    around 0.3 at 25 cycles, and real insects score near that same value. As a
+    result this measure separates insects from background less well than
+    peak SNR. Use it as supporting evidence, not as a gate on its own, and fit
+    its threshold to your own data.
 
-    A CAVEAT THAT MUST NOT BE DROPPED. Short windows are biased upward: with k
-    independent smoothing windows inside a segment, uncorrelated noise still
-    returns roughly 1/sqrt(k), around 0.3 at 25 cycles. Real insect medians sit
-    near that same value, so on Münster data this measure separates targets from
-    background far less well than peak SNR (AUC 0.64 against 0.79) despite the
-    earlier claim in this file that it was the strongest criterion. It is not.
-    Treat it as corroborating evidence, not as a gate on its own, and re-fit its
-    threshold per dataset with `classify.fit_thresholds`.
-
-    Set `window_cycles=None` to recover the old whole-track behaviour.
+    `window_cycles=None` measures the whole signal as one segment.
     """
     if not np.isfinite(f0) or f0 <= 0 or len(sig) < 16:
         return 0.0
@@ -285,11 +327,14 @@ def phase_locking_value(
         v = _plv_segment(sig, fs, f0, cycles)
         return 0.0 if not np.isfinite(v) else v
 
+    # Window length in samples. Too short to demodulate, or longer than the
+    # signal: score the whole signal as one segment instead.
     wlen = int(round(window_cycles * fs / f0))
     if wlen < 32 or wlen >= n:
         v = _plv_segment(sig, fs, f0, cycles)
         return 0.0 if not np.isfinite(v) else v
 
+    # Non-overlapping windows; a leftover tail shorter than wlen is ignored.
     vals = [
         _plv_segment(sig[s:s + wlen], fs, f0, cycles)
         for s in range(0, n - wlen + 1, wlen)
@@ -299,7 +344,12 @@ def phase_locking_value(
 
 
 def autocorrelation(sig: np.ndarray, max_lag: Optional[int] = None) -> np.ndarray:
-    """Unbiased-ish autocorrelation via FFT, lag 0 upward, normalised to r[0] = 1."""
+    """Autocorrelation by FFT for lags 0 to max_lag samples, scaled so r[0] = 1.
+
+    The mean is removed first. Each lag is a plain sum, not divided by its
+    overlap length, so values shrink toward long lags. max_lag defaults to half
+    the signal. Not called by the bundled pipeline.
+    """
     x = np.asarray(sig, np.float64)
     x = x - x.mean()
     n = len(x)
@@ -320,31 +370,36 @@ def estimate_period_yin(
     fmax_hz: float = DEFAULT_FMAX_HZ,
     threshold: float = 0.25,
 ) -> Tuple[float, float]:
-    """Fundamental frequency by the YIN cumulative-mean-normalised difference.
+    """Fundamental frequency by YIN, from the waveform's period.
 
-    Returns (f0_hz, confidence in 0..1).
+    Returns (f0_hz, confidence from 0 to 1), or (nan, 0.0) when no period in
+    [fmin_hz, fmax_hz] is found or the signal is under 64 samples. YIN is the
+    pitch estimator of de Cheveigne and Kawahara (2002).
 
-    WHY THIS EXISTS ALONGSIDE THE SPECTRAL PEAK. A wingbeat is a strongly
-    non-sinusoidal oscillation, so its energy is spread across f0, 2*f0, 3*f0.
-    Picking the largest peak in a periodogram picks whichever harmonic happens to
-    dominate, which for a wing is often 2*f0 because the stroke fires twice per
-    cycle. On real Münster targets the spectral estimator returned 359 Hz for
-    what are almost certainly ~180 Hz insects: a clean octave error, and one that
-    is fatal downstream because folding at twice the true rate scrambles every
-    waveform feature used for identity.
+    Why this exists alongside the spectral peak. A wingbeat is strongly
+    non-sinusoidal, so its energy is spread over f0, 2*f0, 3*f0 and so on. The
+    largest peak in a spectrum is whichever harmonic happens to dominate, and
+    for a wing that is often 2*f0. A spectral estimate can therefore report
+    about 360 Hz for an insect beating at 180 Hz. Folding the signal at twice
+    the true rate then mixes the two half-strokes and ruins any stroke-shape
+    feature.
 
-    Autocorrelation inverts the problem. Harmonics *reinforce* the fundamental
-    lag rather than competing with it, so the true period shows up as the first
-    strong peak. The remaining trap is that autocorrelation also peaks at 2T, 3T,
-    which would give a sub-octave error in the other direction. YIN's answer, and
-    the reason to use YIN rather than plain autocorrelation, is the cumulative
-    mean normalisation plus an absolute threshold: take the *first* lag that dips
-    below the threshold, not the deepest one. That systematically prefers T over
-    its multiples.
+    A period estimate avoids this. Harmonics repeat at the fundamental period
+    too, so they reinforce it instead of competing with it. The remaining risk
+    is that the signal also repeats at 2T and 3T, which would give an error of
+    a factor of two in the other direction. YIN handles that with a cumulative
+    mean normalisation and an absolute threshold: it takes the first lag whose
+    normalised difference dips below the threshold, not the deepest one, and so
+    prefers T over its multiples.
 
-    `threshold` is YIN's aperiodicity tolerance. Lower is stricter; 0.1 suits
-    clean laboratory signals, 0.25 is more forgiving and appropriate for a wild
-    insect whose beat is intermittent.
+    `threshold` is YIN's tolerance for aperiodicity. Lower is stricter. 0.1
+    suits clean laboratory signals; 0.25 suits a wild insect whose beat comes
+    and goes.
+
+    Warning: on large insects with a very strong second harmonic, compare this
+    estimate with the spectral peak before quoting a frequency. The two can
+    disagree by a factor of two, and YIN is usually the one to trust when the
+    track spans many cycles.
     """
     x = np.asarray(sig, np.float64)
     x = x - x.mean()
@@ -352,19 +407,22 @@ def estimate_period_yin(
     if n < 64 or fmin_hz <= 0:
         return np.nan, 0.0
 
+    # Search lags in samples: the shortest period is fs / fmax, the longest
+    # fs / fmin, and the lag may not exceed half the signal.
     tau_min = max(int(np.floor(fs / fmax_hz)), 2)
     tau_max = min(int(np.ceil(fs / fmin_hz)), n // 2 - 1)
     if tau_max <= tau_min + 2:
         return np.nan, 0.0
 
-    # d(tau) = sum_{i<W} (x[i] - x[i+tau])^2 = m(0) + m(tau) - 2*r_W(tau).
+    # Difference function over a window of W samples:
+    #   d(tau) = sum_{i<W} (x[i] - x[i+tau])^2 = m(0) + m(tau) - 2*r_W(tau),
+    # where m(tau) is the energy of the W samples starting at tau.
     #
     # r_W must be the correlation of the FIRST W samples against the shifted
-    # signal, NOT the full-length FFT autocorrelation. Mixing the two makes d
-    # negative (the full-length correlation sums far more terms than the windowed
-    # energies), which clamps to zero over wide lag ranges and produces a d'
-    # that is identically zero at both T and T/2 -- i.e. an estimator that picks
-    # whichever comes first, for no reason at all.
+    # signal, computed here by FFT. A full-length autocorrelation sums more
+    # terms than the windowed energies, which drives d negative. After clamping
+    # to zero, d' would then be zero at both T and T/2 and the estimator could
+    # not tell them apart.
     w = min(n // 2, n - tau_max - 1)
     if w < 32:
         return np.nan, 0.0
@@ -374,6 +432,7 @@ def estimate_period_yin(
     fb = np.fft.rfft(x[:seg_len], nfft)
     r_w = np.fft.irfft(np.conj(fa) * fb, nfft)[: tau_max + 1]
 
+    # Windowed energies from a running sum of squares.
     cumsq = np.concatenate([[0.0], np.cumsum(x * x)])
     m0 = cumsq[w] - cumsq[0]
     idx = np.arange(tau_max + 1)
@@ -382,12 +441,15 @@ def estimate_period_yin(
     d[d < 0] = 0.0
 
     # Cumulative mean normalisation: d'(tau) = d(tau) / mean(d(1..tau)).
+    # d'(0) is defined as 1. Lags where the mean is zero are also set to 1.
     d_prime = np.ones_like(d)
     running = np.cumsum(d[1:])
     with np.errstate(divide="ignore", invalid="ignore"):
         d_prime[1:] = d[1:] * np.arange(1, len(d)) / running
     d_prime[~np.isfinite(d_prime)] = 1.0
 
+    # Absolute threshold: the first local minimum of d' below `threshold`.
+    # If none dips that low, take the overall minimum in the search range.
     band = d_prime[tau_min:tau_max + 1]
     tau = -1
     for i in range(1, len(band) - 1):
@@ -405,11 +467,11 @@ def estimate_period_yin(
     # d'(T/2) can still dip under the threshold because only the weak fundamental
     # differs across that lag.
     #
-    # The discriminator is not "which dip is deeper" but "is the longer lag
-    # *materially* better". A signal genuinely periodic at tau is equally
-    # periodic at 2*tau, so both dips are near zero and we must keep tau. A
-    # signal whose real period is 2*tau leaves a residual at tau, so d'(2*tau)
-    # is much smaller. Requiring a factor-of-two improvement separates the two.
+    # The test is not "which dip is deeper" but "is the longer lag clearly
+    # better". A signal truly periodic at tau is equally periodic at 2*tau, so
+    # both dips are near zero and tau is kept. A signal whose real period is
+    # 2*tau leaves a residual at tau, so d'(2*tau) is much smaller. Requiring a
+    # factor-of-two improvement separates the two cases.
     for k in (2, 3):
         k_tau = tau * k
         if k_tau > tau_max:
@@ -417,7 +479,7 @@ def estimate_period_yin(
         if d_prime[k_tau] < 0.5 * d_prime[tau] and d_prime[k_tau] < threshold:
             tau = k_tau
 
-    # Parabolic refinement of the dip location.
+    # Parabolic refinement of the dip location, to a fraction of a sample.
     if 0 < tau < len(d_prime) - 1:
         a, b, c = d_prime[tau - 1], d_prime[tau], d_prime[tau + 1]
         denom = a - 2 * b + c
@@ -429,37 +491,36 @@ def estimate_period_yin(
     if tau_ref <= 0:
         return np.nan, 0.0
     f0 = fs / tau_ref
+    # Allow 5% outside the band for the refinement step, reject anything further.
     if not (fmin_hz * 0.95 <= f0 <= fmax_hz * 1.05):
         return np.nan, 0.0
+    # Confidence is 1 - d'(tau): a perfect repeat gives d' = 0 and confidence 1.
     return float(f0), float(np.clip(1.0 - d_prime[tau], 0.0, 1.0))
 
 
 def cross_phase_locking(
     sig_a: np.ndarray, sig_b: np.ndarray, fs: float, f0: float, cycles: float = 3.0
 ) -> float:
-    """Is signal A phase-locked to signal B at f0?
+    """Is signal A phase-locked to signal B at f0? Returns 0 to 1.
 
-    This is the discriminator against artificial light. Mains-driven lamps
-    modulate at 100/120 Hz, inside the wingbeat band, and every surface they
-    illuminate flickers in lockstep because they share a supply. So a flickering
-    leaf edge is phase-locked to the rest of the scene, while an insect is
-    phase-locked to nothing: its wingbeat has no fixed relationship to anything
-    else in the field of view.
+    This is the test against artificial light. Lamps on mains power modulate
+    at 100 or 120 Hz, inside the wingbeat band, and every surface they light
+    flickers in step because they share a supply. A flickering leaf edge is
+    therefore phase-locked to the rest of the scene. An insect is phase-locked
+    to nothing: its wingbeat has no fixed relationship to anything else in view.
 
-    Both signals are complex-demodulated at f0 and the resultant length of their
-    phase *difference* is returned. Near 1 means driven by a common source;
-    near 0 means independent.
+    Both signals are complex-demodulated at f0, smoothed over `cycles` cycles,
+    and the resultant length of their phase difference is returned. Near 1
+    means a common driver; near 0 means independent.
 
-    Bias warning: with only n independent smoothing windows in the track, an
-    uncorrelated pair still returns roughly 1/sqrt(n). A 100 ms track at 200 Hz
-    gives about 6 windows, so expect a floor near 0.4 on short tracks and read
-    the threshold accordingly. Longer tracks make this test sharper.
+    Bias: with n independent smoothing windows in the track, an uncorrelated
+    pair still scores about 1/sqrt(n). A 100 ms track at 200 Hz holds about 6
+    windows, so expect a floor near 0.4 on short tracks and set the threshold
+    with that in mind. Longer tracks make the test sharper.
 
-    Note on what is deliberately NOT used here: track speed. A static source is
-    tempting to reject as "not flying", but a foraging insect handling a flower
-    is also static, and that is precisely the case SP3's fallback plan depends on
-    being able to measure. Rejecting on motion would delete the observations that
-    matter most.
+    Track speed is deliberately not used. A static source is tempting to
+    reject as "not flying", but an insect working a flower is also static, and
+    rejecting on motion would remove exactly those observations.
     """
     n = min(len(sig_a), len(sig_b))
     if not np.isfinite(f0) or f0 <= 0 or n < 32:
@@ -470,24 +531,29 @@ def cross_phase_locking(
     if win >= n:
         win = max(3, n // 3)
 
+    # Shift the f0 component to 0 Hz and low-pass it, as in _plv_segment.
     def demod(sig):
         z = sig[:n].astype(np.float64) * carrier
         return uniform_filter1d(z.real, win) + 1j * uniform_filter1d(z.imag, win)
 
     za, zb = demod(sig_a), demod(sig_b)
+    # Drop the edges where the moving average runs past the data.
     edge = win // 2
     if n - 2 * edge > 8:
         za, zb = za[edge:n - edge], zb[edge:n - edge]
+    # Keep samples where both signals have some f0 amplitude.
     mag = np.abs(za) * np.abs(zb)
     good = mag > (1e-12 + 0.05 * np.median(mag))
     if good.sum() < 8:
         return 0.0
+    # za * conj(zb) has the phase difference as its angle; average its unit
+    # phasors and take the length.
     rel = za[good] * np.conj(zb[good])
     return float(np.abs(np.mean(rel / np.abs(rel))))
 
 
 def spectral_flatness(psd: np.ndarray) -> float:
-    """Geometric over arithmetic mean. 1.0 is white noise, 0 is a pure tone."""
+    """Geometric over arithmetic mean of a PSD. 1.0 is white noise, 0 a pure tone."""
     p = psd[psd > 0]
     if p.size < 4:
         return 1.0
@@ -500,23 +566,24 @@ def _reconcile_fundamental(
 ) -> Tuple[float, str, bool]:
     """Combine the spectral peak and the YIN period into one fundamental.
 
-    They answer different questions and fail differently. The spectral peak is
-    precise but picks whichever harmonic is loudest; YIN identifies the true
-    period but resolves it only to a sample lag. So:
+    Returns (f0_hz, source, octave_corrected). source names the estimator used.
 
-    * If they agree, keep the spectral value for its precision.
-    * If the spectral peak is close to an integer multiple of the YIN period,
-      that is an octave error and YIN wins. This is the case that matters.
-    * If YIN has no confidence, fall back to the spectral peak, then to half the
-      unsigned peak, which is the last resort the ON/OFF physics allows.
+    The two estimators fail differently. The spectral peak is precise but picks
+    whichever harmonic is loudest. YIN finds the true period but resolves it
+    only to about a sample lag. So:
 
-    A YIN candidate may only OVERRIDE a finite spectral peak (the two branches
-    above the "no confidence" fallback) when yin_confidence >= override_min_conf.
-    Below that, `min_conf` alone let a barely-confident YIN estimate silently
-    replace a clean spectral line: verified spec=180 Hz beaten by yin=158 Hz at
-    conf 0.20 (2026-08 review finding #4). When the spectral peak is nan this
-    gate does not apply -- YIN at >= min_conf is still the best available
-    estimate, same as before.
+    * If they agree within `agree_tol` (6%), keep the spectral value for its
+      precision.
+    * If the spectral peak is close to 2, 3 or 4 times the YIN frequency, the
+      peak is a harmonic and YIN wins. This is the case that matters.
+    * If YIN has no confidence, fall back to the spectral peak, then to half
+      the unsigned peak, the last resort the ON/OFF physics allows.
+
+    YIN may replace a finite spectral peak only when its confidence is at least
+    `override_min_conf`. Below that, a barely confident YIN value could replace
+    a clean spectral line, for example a 180 Hz line replaced by 158 Hz at
+    confidence 0.20. When there is no spectral peak, YIN at `min_conf` or above
+    is used as the best estimate available.
     """
     have_yin = np.isfinite(f_yin) and yin_conf >= min_conf
     have_spec = np.isfinite(f_spectral)
@@ -552,7 +619,18 @@ def analyse_periodicity(
     """Full periodicity analysis of one track's events.
 
     Pass the events belonging to a single track (see `Track.extract_events`).
-    Passing a whole scene will average every source together and measure nothing.
+    Passing a whole scene averages every source together and measures nothing.
+
+    bin_us is the rate-signal bin in microseconds (200 us = 5 kHz). fmin_hz and
+    fmax_hz bound the search for the fundamental. detrend_hz is the high-pass
+    cutoff that removes slow brightness changes; by default half of fmin_hz,
+    and never below 15 Hz.
+
+    Steps: bin the events into signed and unsigned rates, find the spectral
+    peak of each, estimate the period with YIN, reconcile these into one f0,
+    then measure line SNR, harmonic content, phase locking and low-frequency
+    power at that f0. Tracks too short to analyse come back with the defaults
+    of `PeriodicityFeatures`.
     """
     feats = PeriodicityFeatures()
     if len(ev) == 0:
@@ -564,6 +642,7 @@ def analyse_periodicity(
     feats.duration_s = float(t_s[-1] - t_s[0]) if len(t_s) > 1 else 0.0
     feats.polarity_balance = float(ev.p.sum()) / len(ev)
 
+    # Under 32 bins (6.4 ms at 200 us) there is too little signal for a spectrum.
     if len(unsigned) < 32:
         return feats
 
@@ -572,22 +651,24 @@ def analyse_periodicity(
     u = _detrend_highpass(unsigned, fs, detrend_hz)
     s = _detrend_highpass(signed, fs, detrend_hz)
 
-    # Fundamental candidates from each signal.
+    # Fundamental candidates from each signal. The unsigned rate carries 2*f0,
+    # so its search extends to twice fmax, kept below 90% of Nyquist.
     f_signed, _ = _fine_peak(s, fs, fmin_hz, fmax_hz)
     f_unsigned, _ = _fine_peak(u, fs, fmin_hz, min(2 * fmax_hz, fs / 2 * 0.9))
     feats.f0_signed_hz = f_signed
     feats.f0_unsigned_hz = f_unsigned
 
     # Cross-check: for a real wingbeat the unsigned peak sits at twice the signed
-    # peak. Agreement promotes the signed estimate; disagreement is a warning the
-    # caller can act on rather than a silent octave error.
+    # peak, within 12%. The flag is reported so the caller can act on a
+    # disagreement instead of meeting it later as an octave error.
     octave_ok = (
         np.isfinite(f_signed) and np.isfinite(f_unsigned)
         and abs(f_unsigned - 2 * f_signed) < 0.12 * max(f_signed, 1.0)
     )
     feats.octave_agreement = bool(octave_ok)
 
-    # Independent period estimate that is immune to which harmonic dominates.
+    # Independent period estimate that does not depend on which harmonic is
+    # loudest. Signed rate first; the unsigned rate only if that finds nothing.
     f_yin, yin_conf = estimate_period_yin(s, fs, fmin_hz, fmax_hz)
     if not np.isfinite(f_yin):
         f_yin, yin_conf = estimate_period_yin(u, fs, fmin_hz, fmax_hz)
@@ -602,22 +683,26 @@ def analyse_periodicity(
     feats.f0_hz = float(f0)
     feats.n_cycles = float(f0 * feats.duration_s)
 
-    # Spectrum for SNR and harmonics: use the unsigned rate, which carries the
-    # most event mass, and evaluate lines at f0 and its multiples.
+    # Spectra of both signals. The band for the noise floor and harmonics runs
+    # from half of fmin to three times fmax, capped at Nyquist.
     freqs, psd, df = _psd(u, fs)
     feats.freq_resolution_hz = float(df)
     band = (freqs >= fmin_hz * 0.5) & (freqs <= min(fmax_hz * 3, fs / 2))
 
     freqs_s, psd_s, _ = _psd(s, fs)
     band_s = (freqs_s >= fmin_hz * 0.5) & (freqs_s <= min(fmax_hz * 3, fs / 2))
+    # Line SNR: the signed rate at f0 and the unsigned rate at 2*f0, where each
+    # carries its line. The stronger of the two is reported.
     snr_signed = _line_snr_db(freqs_s, psd_s, f0, band=band_s)
     snr_unsigned = _line_snr_db(freqs, psd, 2 * f0, band=band)
     feats.peak_snr_db = float(max(snr_signed, snr_unsigned))
-    # At f0_signed_hz itself, not the reconciled f0: _line_snr_db is already
-    # nan-safe (returns -inf when the line frequency is non-finite).
+    # The same measure at f0_signed_hz itself, not the reconciled f0.
+    # _line_snr_db returns -inf when the line frequency is not finite.
     feats.peak_snr_signed_db = _line_snr_db(freqs_s, psd_s, f_signed, band=band_s)
 
-    # Harmonic support: how much of the in-band power sits at multiples of f0.
+    # Harmonic support: the fraction of in-band power that sits at f0 and its
+    # first three multiples, on the unsigned spectrum. Each harmonic counts its
+    # strongest bin within 2 bins or 3% of its frequency, whichever is wider.
     harm_power = 0.0
     for h in (1, 2, 3, 4):
         fh = h * f0
@@ -632,7 +717,7 @@ def analyse_periodicity(
     feats.plv = phase_locking_value(s, fs, f0)
 
     # Vegetation signature: fraction of power below the wind ceiling. Computed on
-    # the *undetrended* signal, since the high pass has already removed it.
+    # the signal before the high pass, since the high pass removes exactly this.
     freqs_raw, psd_raw, _ = _psd(unsigned - unsigned.mean(), fs)
     low = freqs_raw <= CLUTTER_FMAX_HZ
     tot_raw = float(psd_raw.sum())
@@ -655,36 +740,18 @@ def instantaneous_frequency(
     reference_tol: float = 0.25,
     min_events: int = 2000,
 ):
-    """Wingbeat frequency in a sliding window, with rejected points returned.
+    """Wingbeat frequency by YIN in a sliding window, with rejected points kept.
 
-    Returns (times_s, freqs_hz, rejected_times_s, rejected_freqs_hz). Everything
-    discarded comes back rather than vanishing, because a trace that has been
-    quietly cleaned looks identical to one that never had a problem.
+    Returns (times_s, freqs_hz, rejected_times_s, rejected_freqs_hz), times in
+    seconds from the first event. Not called by the bundled pipeline.
 
-    Two filters, and they reject different things:
-
-    `min_confidence` drops windows where YIN could not find a period at all --
-    the animal was between wingbeats, occluded, or out of the box.
-
-    `continuity_tol` catches something more interesting: a window that returns a
-    confident but wrong period. Measured on a real Münster target, one window in
-    149 came back at almost exactly half the true rate at high YIN confidence --
-    a confident sub-harmonic, which is the one error mode the octave guard in
-    `estimate_period_yin` does not catch, because locally the signal really does
-    look periodic at twice the period. The rejection is physiological rather than
-    cosmetic: a wingbeat is driven by a resonant thoracic system and cannot
-    change by tens of percent between windows 20 ms apart, so a point far from
-    its local neighbourhood is an estimator failure, not a measurement.
-
-    `reference_hz` closes the gap the local filter cannot. A median filter only
-    sees a neighbourhood, so a *run* of consecutive sub-harmonic windows is
-    self-consistent and survives -- which is exactly what happened at the start
-    of one track, where several windows in a row sat near half rate and formed
-    their own perfectly smooth little plateau. Passing the track-level estimate,
-    computed from every event rather than from 60 ms of them, gives an anchor
-    that a run cannot fake. The tolerance is deliberately wide, since insects do
-    change wingbeat with load and manoeuvre; at 25 % it still cleanly excludes a
-    factor-of-two error without touching plausible variation.
+    Windows of `window_us` step by `step_us`; windows with fewer than
+    `min_events` events are skipped. Three filters reject points:
+    `min_confidence` drops windows where YIN found no clear period.
+    `reference_hz`, if given, drops points more than `reference_tol` (25%) from
+    a track-level f0; this catches a run of half-rate windows that agree with
+    each other. `continuity_tol` drops points more than 15% from the median of
+    their 5 neighbours, since a wingbeat cannot change that much in 20 ms.
     """
     if len(ev) == 0:
         z = np.zeros(0)
@@ -746,27 +813,25 @@ def phase_track(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Wingbeat phase over time, in unwrapped cycles, by complex demodulation.
 
-    Returns (t_us, cycles) on the rate-signal grid; read an event's phase with
-    np.interp(ev.t, t_us, cycles) % 1. Phase 0 is arbitrary.
+    Returns (t_us, cycles) on the rate-signal grid. Read an event's phase with
+    np.interp(ev.t, t_us, cycles) % 1. Phase 0 is arbitrary. The slope of
+    cycles against time is the wingbeat frequency at each moment.
 
-    WHY. Epoch folding at one f0 assumes the wingbeat holds still, and a moth's
-    does not. On recording_2026-10-02_21-38-40 track 71, f(t) over 100 ms ran
-    35.8/42.2/45.5 Hz (p5/p50/p95), so a 40-stroke fold at one f0 walked 1.05
-    cycles out of phase inside its own window: the folded stroke averaged every
-    wing position into every frame. Following the phase instead of assuming it
-    is what phase-locked averaging in electrophysiology does.
+    Why. Folding at one fixed f0 assumes the wingbeat frequency holds still,
+    and it often does not. In one moth track the frequency over 100 ms ranged
+    from 36 to 46 Hz, so a 40-stroke fold at a single f0 drifted about one full
+    cycle out of phase within its own window and blurred every wing position
+    together. Following the phase avoids this. Phase-locked averaging in
+    electrophysiology works the same way.
 
-    HOW. The signed rate (which carries f0; the unsigned need not, see
-    half_cycle_similarity) is demodulated at f0 and low-passed at `lowpass_hz`,
-    so the residual angle follows any frequency within f0 +/- lowpass_hz; that
-    residual is added to the nominal 2*pi*f0*t. Zero-phase filtering, so no lag.
-
-    MEASURED (same track, cross-validated: phase estimated from a random half of
-    the events, stroke images built from the other half): stroke contrast at
-    N=40 cycles 0.027 with one f0, 0.089 phase-tracked, -0.004 for an
-    off-frequency control; phase tracking won in 13 of 14 windows with N=5-40.
-    Split-half phase noise 0.01-0.04 cycle. 8 Hz is what was measured; it is not
-    an optimum.
+    How. The signed rate, which carries f0, is demodulated at f0_hz and
+    low-passed at `lowpass_hz`. The angle that remains follows any frequency
+    within f0_hz +/- lowpass_hz, and is added to the nominal f0_hz * t. The
+    filter runs forwards and backwards, so it adds no lag. On that moth track,
+    with the phase taken from one random half of the events and the stroke
+    image built from the other half, stroke contrast at 40 cycles rose from
+    0.027 at a fixed f0 to 0.089 with phase tracking. lowpass_hz = 8 is the
+    value that was tested, not a proven optimum.
     """
     t0 = int(ev.t[0]) if t0_us is None else int(t0_us)
     t1 = int(ev.t[-1]) + 1 if t1_us is None else int(t1_us)
@@ -775,6 +840,8 @@ def phase_track(
     s = _detrend_highpass(s, fs, detrend_hz)
     tt = t_s - t0 / 1e6
     z = s * np.exp(-2j * np.pi * f0_hz * tt)
+    # 3rd-order Butterworth low pass, applied only when the signal is long
+    # enough for filtfilt's edge padding.
     b, a = sps.butter(3, lowpass_hz / (fs / 2))
     if len(z) > 3 * max(len(a), len(b)):
         z = sps.filtfilt(b, a, z.real) + 1j * sps.filtfilt(b, a, z.imag)
@@ -788,11 +855,12 @@ def fold_waveform(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Phase-fold a rate signal at f0 (epoch folding).
 
-    Returns (phase_centres, mean_waveform, cycle_matrix) where cycle_matrix is
-    (n_cycles, n_phase_bins) with NaN for empty bins. The mean waveform is the
-    per-individual stroke shape that O3.3 tests; the cycle matrix is what lets
-    you ask how repeatable that shape is within a single track, which is the
-    lower bound on any between-individual claim.
+    Each sample is assigned to a wing cycle and a phase bin within it.
+    Returns (phase_centres, mean_waveform, cycle_matrix). phase_centres run
+    from 0 to 1. cycle_matrix is (n_cycles, n_phase_bins) with NaN for empty
+    bins. The mean waveform is the average stroke shape of this individual.
+    The cycle matrix shows how repeatable that shape is within one track,
+    which bounds how well any two individuals could be told apart.
 
     `phase_cycles`, if given, is each sample's phase in unwrapped cycles (from
     `phase_track`) and replaces the fixed clock (t - t0) * f0, so a wingbeat
@@ -809,10 +877,12 @@ def fold_waveform(
         # below its starting value, and a negative cycle index would wrap.
         pc = np.asarray(phase_cycles, np.float64)
         rel = pc - np.floor(pc.min())
+    # Integer part is the cycle number, fractional part the phase within it.
     cycle = np.floor(rel).astype(np.int64)
     phase_bin = np.clip(((rel - cycle) * n_phase_bins).astype(np.int64), 0, n_phase_bins - 1)
     n_cycles = int(cycle.max()) + 1
 
+    # Mean of the samples falling in each (cycle, phase bin) cell.
     acc = np.zeros((n_cycles, n_phase_bins))
     cnt = np.zeros((n_cycles, n_phase_bins))
     np.add.at(acc, (cycle, phase_bin), sig)
@@ -820,6 +890,7 @@ def fold_waveform(
     with np.errstate(invalid="ignore", divide="ignore"):
         cycles = np.where(cnt > 0, acc / cnt, np.nan)
 
+    # Average over cycles, ignoring empty cells; a bin empty in every cycle is 0.
     with warnings_suppressed():
         mean_wave = np.nanmean(cycles, axis=0)
     mean_wave = np.nan_to_num(mean_wave)
@@ -828,23 +899,24 @@ def fold_waveform(
 
 
 def half_cycle_similarity(ev: EventStream, f_fold: float, n_phase_bins: int = 32) -> float:
-    """Octave arbiter: fold the signed rate at f_fold and correlate its halves.
+    """Octave check: fold the signed rate at f_fold and correlate its two halves.
 
-    Call it at HALF the periodogram frequency. One folded cycle then holds two
-    candidate strokes. If the periodogram line is the true wingbeat, the two
-    halves are the same stroke twice and correlate near the no-doubling value of
-    a control group; if half of it is the true wingbeat, they are an up-stroke
-    and a down-stroke, which fire different events, and correlate lower.
+    Returns the Pearson correlation between the first and second half of the
+    folded cycle, or nan if the track is too short or a half is flat.
 
-    The statistic has no absolute threshold. Read it against a control group
-    whose estimators already agree (honey bees in analysis/visapp_arbitrate.py,
-    where this was written and from which it is promoted unchanged) and against
-    an off-period fold at f_fold * 1.37, which is a subharmonic of nothing and
-    shows what folding alone produces. On VISAPP that arbitration settled the
-    bumble-bee doubling: the periodogram read the second harmonic on 23 of 44.
+    Call it at HALF the spectral peak frequency. One folded cycle then holds
+    two candidate strokes. If the spectral peak is the true wingbeat, the two
+    halves are the same stroke twice and correlate highly. If half the peak is
+    the true wingbeat, the halves are an up-stroke and a down-stroke, which
+    produce different events, and correlate lower.
 
-    Use raw track events. Coincidence filters censor stroke phase (Conv1's
-    discards sit 123 degrees away in the cycle, wf8_taps.py), and this is a
+    There is no absolute threshold. Read the value against a control group of
+    tracks whose spectral and YIN estimates already agree, and against a fold
+    at f_fold * 1.37, which is a subharmonic of nothing and shows what folding
+    alone produces.
+
+    Use the track's raw events, not denoised ones. A coincidence filter
+    removes more events at some stroke phases than at others, and this is a
     phase statistic.
     """
     if not np.isfinite(f_fold) or f_fold <= 0:
@@ -881,13 +953,15 @@ def lomb_scargle_peak(
     t_us: np.ndarray, fmin_hz: float = DEFAULT_FMIN_HZ, fmax_hz: float = DEFAULT_FMAX_HZ,
     n_freqs: int = 2000,
 ) -> Tuple[float, float]:
-    """Periodicity straight from event timestamps, with no binning.
+    """Strongest periodicity straight from event timestamps, with no binning.
 
-    For sparse tracks (a distant target, or a few hundred events) binning throws
-    away most of the timing information the sensor gave you. Lomb-Scargle on the
-    raw arrival times keeps it. Slower, so it is not the default path.
+    For sparse tracks, a distant target or a few hundred events, binning
+    discards much of the timing information. Lomb-Scargle works on the raw
+    arrival times. Slower than the binned path. Not called by the bundled
+    pipeline.
 
-    Returns (f_peak_hz, normalised_power).
+    Returns (f_peak_hz, normalised_power), searched over `n_freqs` evenly
+    spaced frequencies in [fmin_hz, fmax_hz].
     """
     if len(t_us) < 16:
         return np.nan, 0.0
@@ -895,8 +969,8 @@ def lomb_scargle_peak(
     y = np.ones_like(t)
     y = y - y.mean()
     if np.allclose(y, 0):
-        # Uniform weights carry no amplitude information; use the local inter-arrival
-        # rate as the observable instead.
+        # Equal weights are all zero once the mean is removed, so this branch
+        # always runs: the observable is the instantaneous rate 1 / inter-arrival.
         dt = np.diff(t, prepend=t[0])
         y = 1.0 / np.maximum(dt, 1e-9)
         y = y - y.mean()

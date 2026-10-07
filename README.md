@@ -4,14 +4,12 @@ Give it an event-camera recording; it finds the flying insects, tracks them,
 and measures each one's wingbeat, as a per-track frequency and as the time of
 every wing stroke.
 
-This is the code that produced the Ecology project's Bogong moth results and
-that its bee settings use. It is copied from the research code by
-`analysis/export_starter.py`, not rewritten. `PROVENANCE.json` names the
-source commit (this build: `aff11f0`, 8 October 2026) and the hash of every
-copied file. On the moth recording and on bee data it gives the research
-code's own answers, track for track and stroke for stroke. That check
-(`analysis/starter_equivalence.py`) lives in the research repository, which
-is private because the data cannot be shipped.
+The algorithm files (`census.py` and `insect_evs/`) are copied from a private
+research repository; `PROVENANCE.json` names the source commit and
+fingerprints every copied file. Their comments were rewritten for a first
+read, and the code itself is unchanged. Run on a Bogong moth recording and a
+honey bee recording, this folder gives the research code's answers exactly,
+track for track and stroke for stroke.
 
 ## Install once
 
@@ -26,7 +24,7 @@ On macOS or Linux use `python3 -m venv .venv` and `.venv/bin/python`. For
 NPZ/CSV input only, `requirements.txt` is enough; for HDF5 add `h5py`.
 
 `numba` is required, not optional: without it the noise filter falls back to
-an approximation and the results stop matching the research code.
+a slower approximation that gives slightly different results.
 
 ## Try it on your own recording
 
@@ -35,7 +33,7 @@ an approximation and the results stop matching the research code.
 ```
 
 It opens a file dialog (or pass the path: `try_my_data.py recording.raw`;
-`--no-dialog` to type it), asks which settings to use (moth or bee), where to
+`--no-dialog` to type it), asks which settings to use (moth, bee or wide), where to
 start and how many seconds to process, then runs everything and prints the
 wingbeat of the longest tracks. Every question has a default in brackets;
 press Enter to take it. Outputs go to `outputs/NAME_SETTINGS_STARTs/`. It runs
@@ -54,16 +52,28 @@ outputs keep the recording's own clock. The recording is processed in
 back-to-back windows of `--window` seconds (default 4). A 4 s window of a busy
 1280x720 recording (about 5 million events) takes one to two minutes.
 
-### Presets: one algorithm, two physical scales
+### Presets: one algorithm, three physical scales
 
-| preset | detector window / step | coast | wingbeat band | used for |
+| preset | detector window / step | coast | wingbeat range | for |
 |---|---|---|---|---|
-| `moth` | 12 ms / 4 ms | 100 ms | candidates 18-80 Hz, line search 15-500 Hz | Bogong moths at a lamp, Oct 2026 |
-| `bee` | 5 ms / 2.5 ms | 10 ms | 120-320 Hz | honey bees (the project's frozen detection recipe) |
+| `moth` | 12 ms / 4 ms | 100 ms | 18-80 Hz | moths and other large, slow flyers (tested on Bogong moths) |
+| `bee` | 5 ms / 2.5 ms | 10 ms | 120-320 Hz | honey bees |
+| `wide` | 8 ms / 4 ms | 50 ms | 15-500 Hz | a recording where you do not know what is flying |
 
 The detector window is about one wing stroke of the animal: 5 ms is a whole
 stroke of a 230 Hz bee but a fifth of a 40 Hz moth's, and a window shorter
-than a stroke splits one moth into wing fragments. Everything else is shared.
+than a stroke splits one moth into wing fragments. The coast is how long a
+track may go unseen before it ends. Everything else is shared.
+
+Any preset can be adjusted with `run.py`:
+- `--band LO HI`: the wingbeat range in Hz. A wingbeat outside it is not
+  reported.
+- `--window-ms MS`: the detector window; the step is half of it.
+- `--max-size PX`: the largest blob kept, default 90 px. Raise it for insects
+  that fill more of the image.
+
+For an unknown recording, run `wide` first, look at where the wingbeats fall,
+then narrow `--band` and set `--window-ms` to about 1000 / wingbeat.
 
 ## Outputs
 
@@ -71,13 +81,13 @@ than a stroke splits one moth into wing fragments. Everything else is shared.
   (empty if none could be settled), `fundamental_from` says which estimate
   supplied it, and `verdict` is `wingbeat` or `no line`. `f0_signed_hz` is the
   strongest line in the ON-minus-OFF event rate; on moths it is often a
-  harmonic, which is why the octave check exists. `lamp_R` measures lock to
-  the scene's mains flicker. Every other column the research code computes
-  follows.
+  multiple of the true wingbeat, which is why the multiple is checked
+  separately. `lamp_R` measures how strongly the track flickers with the
+  scene's mains lighting. Every other column the census computes follows.
 - `strokes.csv`: one row per detected wing stroke: track, time, interval to
   the previous stroke, `stroke_rate_hz` = 1 / interval, and
   `rate_median5_hz`, the median of the last five `stroke_rate_hz` values,
-  which is the changing wingbeat number the research clips show.
+  which follows the wingbeat as it changes.
 - `detections.csv`: every detection in every track: time, position, size.
 - `census_<start>s.png`: tracks drawn on the window's event count image,
   coloured by verdict, with the wingbeat histogram.
@@ -96,27 +106,29 @@ What the numbers are, and how well they were measured:
   0.5 ms bins. On synthetic insects with known rates the typical stroke is
   within 0.8% (moths) and 1.5% (bees) of the truth. On real recordings there
   is no truth, but intervals reading over 1.4x or under 0.7x the track's own
-  wingbeat, which are stroke-clock errors rather than wings, were 7% on a bee
-  test window and 11% on the moth recording. A second clock (the event centroid)
-  disagrees with this one stroke by stroke, so the per-stroke rate shows that
-  the rate changes more than it measures each stroke exactly.
+  wingbeat, which are errors of the stroke timing rather than real wing
+  changes, were 7% on a honey bee recording and 11% on a moth recording. Timing
+  strokes a second way, from the event centroid, disagrees with this one
+  stroke by stroke, so treat single strokes as approximate.
 - `rate_median5_hz` ignores a single stroke counted twice or missed: those
-  gross errors fall to 0.9% on the bee window and 3.3% on the moth recording.
+  gross errors fall to 0.9% on the bee recording and 3.3% on the moth one.
   The cost is time. On synthetic insects whose wingbeat swings by 15%, it
   shows 95% of a moth's swing at 2 swings per second, 70% at 4 and 32% at 8,
   about 60 ms late; for bees, 94% at 10 swings per second, 11 ms late.
-- No detection accuracy is claimed. These recordings have no labels.
+- With the `wide` preset, wingbeats are as accurate as with the others on
+  synthetic insects, but per-stroke timing on slow wings is weaker: two of
+  four synthetic 38 Hz tracks read their median stroke 18% low. Once the
+  wingbeats are known, rerun with a narrower `--band`.
+- No detection accuracy is claimed: the test recordings have no hand labels.
 
-## Known limits of this version
+## Known limits
 
 - A track that crosses a window edge is cut there and appears in both
   windows.
 - A moth whose wings form separate blobs in one detector window can carry
-  two IDs at once. The research project is testing a fix (grouping
-  overlapping boxes); it is not in this version.
-- The bee results in the research project also used a calibrated front end
-  (Conv1 or a frozen threshold map) that needs per-site calibration. It is
-  not included, so bee runs use the same 1 ms noise filter as moth runs.
+  two IDs at once.
+- Two insects whose boxes overlap in one window become one detection, and
+  insects crossing within about 45 px can swap IDs.
 - The lamp tests always use the strongest scene line between 95 and 105 Hz,
   even in a recording with no lamp, and a wingbeat within 1 Hz of 1, 2 or 3
   times that line is not reported. Near 200 Hz this can drop a bee.
@@ -133,9 +145,9 @@ What the numbers are, and how well they were measured:
 
 Polarity may be -1/+1, 0/1 or boolean. Events must be in time order.
 
-Do not swap faery for expelliarmus. On an IDS (Sony IMX636) EVT3 recording
-expelliarmus returned the right events with timestamps running at half speed
-(the lamp's 100 Hz flicker read 49.99 Hz), which halves every frequency.
+Do not swap faery for the expelliarmus decoder. On EVT3 recordings from an IDS
+camera (Sony IMX636 sensor), expelliarmus returns the right events with
+timestamps running at half speed, which halves every frequency.
 
 ## Check it
 
@@ -143,18 +155,21 @@ expelliarmus returned the right events with timestamps running at half speed
 .venv\Scripts\python.exe verify.py
 ```
 
-Synthetic insects with known wingbeats come back within 1% (both presets);
+Synthetic insects with known wingbeats come back within 1% (all three presets);
 NPZ, CSV, HDF5 and EVT3 RAW copies of the same events give identical tracks;
 `try_my_data.py` with typed answers gives the same tracks as `run.py`;
 malformed input is rejected with a message.
 
 ## Read the code
 
-Start with `WALKTHROUGH.md`, then `run.py`, then `census.run_census`.
+`HOW_IT_WORKS.md` explains each algorithm step by step in plain language.
+Then follow `WALKTHROUGH.md` through the code: `run.py`, then
+`census.run_census`.
 
 ## Licence
 
-MIT, from the Ecology project (`PROJECT_LICENSE_DECLARATION.toml`, `LICENSE`).
+MIT (`LICENSE`; the source project's own declaration is in
+`PROJECT_LICENSE_DECLARATION.toml`).
 `insect_evs/descriptor.py` is from evfilt (MIT, same author). faery is
 LGPL-3.0, installed separately and not bundled. No recordings, derived media
 or dataset files are included.

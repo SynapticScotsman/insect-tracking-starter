@@ -1,6 +1,7 @@
 {
  "source_project": "Ecology / insect-evs",
- "source_commit": "aff11f0",
+ "source_commit": "ae8b08e",
+ "comments": "The copied files' comments and docstrings may be rewritten for first-time readers after export. sha256 is of the file as exported; code_sha256 is of its code alone (syntax tree without bare strings) and must still match: analysis/export_starter.py DEST --check.",
  "source_files_uncommitted": [],
  "exporter": "analysis/export_starter.py",
  "package_scope": "The census chain shown on the Bogong moth recording (12 ms preset) and the bee settings (frozen-recipe preset): BAF noise filter, detect_blobs, link_tracks, per-track wingbeat with a per-track octave call, per-stroke frequency.",
@@ -8,43 +9,48 @@
   {
    "file": "insect_evs/events.py",
    "source": "src/insect_evs/events.py",
-   "source_sha256": "7a60e5f60b5e223027664d7657d064b5a92dc6d5d0e76ac5e805c3c48e685956",
-   "sha256": "7a60e5f60b5e223027664d7657d064b5a92dc6d5d0e76ac5e805c3c48e685956",
-   "edits": "none (byte copy)"
+   "source_sha256": "314755dd861fea96597ee66833cac0279d8ff77b0543e0c6051f20bb4f02d78d",
+   "sha256": "314755dd861fea96597ee66833cac0279d8ff77b0543e0c6051f20bb4f02d78d",
+   "edits": "none (byte copy)",
+   "code_sha256": "4d70fa30e2725d46ef17d50a95f1d25369374404f1ba01d3457192194c19c717"
   },
   {
    "file": "insect_evs/denoise.py",
    "source": "src/insect_evs/denoise.py",
-   "source_sha256": "871667f0522ad919802b091cc1d8f89942f445200743a5681383661916b80597",
-   "sha256": "871667f0522ad919802b091cc1d8f89942f445200743a5681383661916b80597",
-   "edits": "none (byte copy)"
+   "source_sha256": "6e15da1554a698035408a42fa58ab7cd6d17f4f03a7d842e7ad1898cd50bb3d9",
+   "sha256": "6e15da1554a698035408a42fa58ab7cd6d17f4f03a7d842e7ad1898cd50bb3d9",
+   "edits": "none (byte copy)",
+   "code_sha256": "e2010f2c4d30558e0bd49b092be3a30e535dd4cb7914d792dfb420005f357d73"
   },
   {
    "file": "insect_evs/detect.py",
    "source": "src/insect_evs/detect.py",
-   "source_sha256": "b20379e2d24661ca9623a8e8c45723d2d0c8ed838f33e68b0eb7ccf6f8485429",
-   "sha256": "b20379e2d24661ca9623a8e8c45723d2d0c8ed838f33e68b0eb7ccf6f8485429",
-   "edits": "none (byte copy)"
+   "source_sha256": "1d08de5f5f98bf41649b152b6ae05d88bbcb15b9f535915c4318eef11a2ed619",
+   "sha256": "1d08de5f5f98bf41649b152b6ae05d88bbcb15b9f535915c4318eef11a2ed619",
+   "edits": "none (byte copy)",
+   "code_sha256": "c01e31844917aea6dd13ef52b2cd14c4075473147d36861b45ff68770918809c"
   },
   {
    "file": "insect_evs/track.py",
    "source": "src/insect_evs/track.py",
    "source_sha256": "cabda60734f67017163c1ca3bfe0452ddacb3dbf6492400fc9a7891df142e15d",
    "sha256": "cabda60734f67017163c1ca3bfe0452ddacb3dbf6492400fc9a7891df142e15d",
-   "edits": "none (byte copy)"
+   "edits": "none (byte copy)",
+   "code_sha256": "18d28206c9b5a17cfe834fbdceb8c14d4c90f72b5141a268d2059534c2c4a4b7"
   },
   {
    "file": "insect_evs/periodicity.py",
    "source": "src/insect_evs/periodicity.py",
-   "source_sha256": "9208ea972ac963a529fc3d0475bb4d9a0c5f531bd500179176babd25bf41fa43",
-   "sha256": "9208ea972ac963a529fc3d0475bb4d9a0c5f531bd500179176babd25bf41fa43",
-   "edits": "none (byte copy)"
+   "source_sha256": "8c4798c3ef6e8d983e17a7336056a7165023903c9786f26a2e3d585c39d67494",
+   "sha256": "8c4798c3ef6e8d983e17a7336056a7165023903c9786f26a2e3d585c39d67494",
+   "edits": "none (byte copy)",
+   "code_sha256": "a45bbb26b0886f999479a06ebf6d5cdff908532a92749f77c38b72b2d98a7c23"
   },
   {
    "file": "insect_evs/gate.py",
    "source": "src/insect_evs/classify.py",
-   "source_sha256": "5b4041b73399146006a2e009a45ae2143df9e841bab53ab6f4620b5a86a1bd27",
-   "sha256": "9fc665401cb63897917f84a1db5ad05587c1936839b015d0e7e5193f84d570fa",
+   "source_sha256": "3a6a19c573643671d62d9fee265bf6f27ffcae1a8fbc4812c83a84c05b3271e8",
+   "sha256": "b04dc6a0fcbfc971205e3a20c159079e9a694d053e0d5d18ffe62fbc4f5f4875",
    "lifted": [
     {
      "name": "GateConfig",
@@ -78,11 +84,12 @@
      "name": "PeriodicityGate",
      "lines": [
       143,
-      190
+      210
      ]
     }
    ],
-   "edits": "header imports written; bodies verbatim"
+   "edits": "header imports written; bodies verbatim",
+   "code_sha256": "37888d7c43436e2d896134a5861135996ae9bbb5fdf0be4362b342b24c1b9eb8"
   },
   {
    "file": "insect_evs/descriptor.py",
@@ -92,13 +99,14 @@
    "lifted": [
     "descriptor_autocorr"
    ],
-   "edits": "none"
+   "edits": "none",
+   "code_sha256": "0feff198bd273e4d4318dd8e8bb2f97ad8b9481cddda3cdd392231c20a3eaef2"
   },
   {
    "file": "census.py",
    "source": "analysis/recording_census.py",
-   "source_sha256": "419bc09a58d75222c57ccf8098ecbf50e5b47abafc551e622230aca20015b965",
-   "sha256": "9928e1c80e999da1037a8845ac15a0b7cb3c20cada2303305d747301aa1ed222",
+   "source_sha256": "653c3c793fe57755741d98c54340fbaa75b7bac3284b37286c3fd8fe381795ba",
+   "sha256": "fed742897df4689dad4cad7fed3368e0b12e96591d3b8f5fd5ed22af3894d7c3",
    "lifted": [
     {
      "name": "tuple",
@@ -237,21 +245,21 @@
      "name": "run_census",
      "lines": [
       514,
-      637
+      673
      ]
     },
     {
      "name": "coverage",
      "lines": [
-      640,
-      672
+      676,
+      708
      ]
     },
     {
      "name": "census_figure",
      "lines": [
-      883,
-      953
+      919,
+      1007
      ]
     }
    ],
@@ -260,7 +268,8 @@
      "old": "from evfilt.periodicity import descriptor_autocorr",
      "new": "from insect_evs.descriptor import descriptor_autocorr"
     }
-   ]
+   ],
+   "code_sha256": "0fdec6b409155ca35fc7a80469b793f386ef531cd516129661b769d49acea363"
   }
  ]
 }

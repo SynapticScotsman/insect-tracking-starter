@@ -1,37 +1,40 @@
 """Blob detection in short time windows.
 
-Deliberately permissive. This stage exists to propose candidates with high
-recall, not to decide what is an insect: a swaying leaf cluster produces a
-perfectly good blob and will be proposed here. Rejection happens later, on the
-periodicity of the candidate's event stream, because that is the axis on which
-insects and vegetation actually separate. Tuning this stage to suppress clutter
-spatially is the classic mistake; it costs you the small, fast, low-contrast
-targets first.
+The detector slides a window of `window_us` microseconds along the stream,
+starting a new window every `hop_us`. In each window it counts events per
+pixel, blurs the count image, thresholds it, and cuts the mask into connected
+components. Each component that passes the size and event-count gates becomes
+one Detection.
 
-READ THIS BEFORE CHOOSING PARAMETERS. Instrumentation against 609 reference bee
-tracks on the AEMOT Bee Swarm sequence found several traps here, all now either
-fixed or documented in place:
+This stage is permissive on purpose. Its job is to propose candidates with high
+recall, not to decide what is an insect. A swaying leaf cluster makes a good
+blob and will be proposed here. Rejection happens later, on the periodicity of
+each track's events, because that is where insects and vegetation differ.
+Tightening this stage to suppress clutter by shape or size loses the small,
+fast, low-contrast insects first.
 
-  THE SENSITIVITY FLOOR IS `pixel_threshold`, NOT `min_events`. `cv2.GaussianBlur`
-  normalises, so a single event deposits only 0.1592 at its own pixel at
-  blur_sigma=1.0 -- pixel_threshold=0.5 therefore demands 3.1 COINCIDENT EVENTS on
-  one pixel before any mask pixel exists at all. Use `coincidence=` to say that in
-  events rather than guessing at density units.
+Four things to know before choosing parameters:
 
-  TWO THINGS WERE CALLED `min_events`. One rejected the whole frame, one rejected a
-  blob. They are now `min_events_frame` and `min_events_blob`; `min_events` remains
-  as an alias for the blob gate, which is what every caller meant.
+  The sensitivity floor is set by `pixel_threshold`, not by the event-count
+  gates. The Gaussian blur is normalised, so one event adds only 0.159 to its
+  own pixel at blur_sigma=1.0. A pixel_threshold of 0.5 therefore needs about
+  3 events on the same pixel before that pixel joins the mask. The
+  `coincidence` argument states the threshold in events directly.
 
-  SAME-FRAME DUPLICATES ARE THE DOMINANT TRACKING DEFECT. Measured, 49% of track
-  breaks are two output tracks alive on one bee at the same instant: 1,060 of
-  19,959 bee-frames carry more than one detection for a single bee, median
-  separation 26.6 px, the second blob holding 45% of the first's events. One insect
-  torn in two. `nms_dist_px` now suppresses this at source and is ON by default.
+  `min_events_frame` skips a whole window with fewer events.
+  `min_events_blob` drops a single blob with fewer events. `min_events` is an
+  older name for `min_events_blob`, kept so existing calls still work.
 
-  THE WINDOW GRID IS ANCHORED ON EACH STREAM'S OWN FIRST TIMESTAMP, so two calls on
-  two different streams do NOT share a `t_us` grid. Matching detections between
-  calls by equal `t_us` silently returns zero matches. Pass `grid_origin_us` to tie
-  several calls to one grid.
+  One insect can appear as two blobs in the same window, a few tens of pixels
+  apart. Each blob then seeds its own track. `nms_dist_px` keeps only the
+  richer of two blobs closer than that distance in the same window. It is on
+  by default (25 px). It cannot tell one animal reported twice from two animals
+  close together, so set it to 0 when every nearby animal must be counted.
+
+  Window start times lie on an absolute grid: multiples of `hop_us` from time
+  zero. Two calls with the same `hop_us` share a grid, whatever events each one
+  was given, so their detections can be matched by `t_us`. Pass
+  `grid_origin_us` to set the grid origin explicitly.
 """
 
 from __future__ import annotations
@@ -41,6 +44,8 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
+# OpenCV is optional. Without it the blur and the component labelling fall
+# back to scipy, which is slower.
 try:
     import cv2
 except ImportError:  # pragma: no cover
@@ -48,6 +53,8 @@ except ImportError:  # pragma: no cover
 
 from .events import EventStream
 
+# Optional compiled extension, not shipped with this package. Everything works
+# without it.
 try:
     import insect_evs_rust as _rust_detect
 except ImportError:  # pragma: no cover
@@ -55,23 +62,27 @@ except ImportError:  # pragma: no cover
 
 
 def rust_available() -> bool:
+    """True when the optional compiled extension insect_evs_rust is installed.
+    The package runs without it."""
     return _rust_detect is not None
 
 
 @dataclass
 class Detection:
-    t_us: int              # window centre
-    t0_us: int
-    t1_us: int
-    x: float               # centroid, pixels
+    """One blob found in one time window."""
+    t_us: int              # window centre, us
+    t0_us: int             # window start, us
+    t1_us: int             # window end, us (exclusive)
+    x: float               # centroid, pixels: mean of the blob's event coordinates
     y: float
-    bbox: tuple            # x0, y0, x1, y1 (half-open)
-    n_events: int
-    area_px: int
+    bbox: tuple            # x0, y0, x1, y1 in pixels (half-open)
+    n_events: int          # events that landed on the blob's pixels
+    area_px: int           # mask pixels in the blob
     polarity_balance: float  # (ON - OFF) / total within the blob
 
     @property
     def size_px(self) -> float:
+        """Larger side of the bounding box, in pixels."""
         x0, y0, x1, y1 = self.bbox
         return float(max(x1 - x0, y1 - y0))
 
@@ -81,18 +92,20 @@ def merge_detections(
     time_tol_us: float = 5_000.0,
     dist_tol_px: float = 12.0,
 ) -> List["Detection"]:
-    """Collapse detections of the same target arriving from different scales.
+    """Collapse detections that coincide in space and time into one.
 
-    Keeps the one with the most events among any group that coincides in space
-    and time. Preferring the richest rather than the earliest matters because
-    the whole point of the longer windows is that they see targets the short
-    ones cannot, so the short-window version is often the impoverished one.
+    Two detections clash when their window centres are within `time_tol_us`
+    microseconds and their centroids within `dist_tol_px` pixels. Of any group
+    that clashes, the one with the most events is kept. Used two ways: to merge
+    the same target seen at several window lengths, and, with time_tol_us=0, to
+    suppress two blobs on one target in the same window.
 
-    Bucketed by time, because the obvious implementation compares every survivor
-    against every candidate and is O(n^2): on a full recording that cost 767 s
-    for a call whose detection work was 20 s. Two detections can only clash if
-    they are within `time_tol_us`, so only neighbouring time buckets need
-    checking, and the result is bit-identical.
+    The richest detection wins, not the earliest, because a longer window often
+    sees a faint target that a shorter window catches only partly.
+
+    Detections are grouped into time buckets one `time_tol_us` wide, so each is
+    compared only with the buckets beside it rather than with every other
+    detection. The result is the same as the all-pairs comparison.
     """
     if not detections:
         return []
@@ -132,27 +145,24 @@ def detect_blobs_multiscale(
     grid_origin_us: Optional[int] = None,
     **kwargs,
 ) -> List["Detection"]:
-    """Detect at a bank of accumulation windows and merge the results.
+    """Run detect_blobs at several window lengths and merge the results.
 
-    A single window length is a single arbitrary choice, and the diagnostic says
-    it is the wrong one for most targets. Measured over 3,566 annotated keyframe
-    boxes, detection recall depends far more on how many events land inside the
-    box than on any threshold: below 20 events per 10 ms window recall is
-    literally zero, and above 250 it exceeds 0.96. The detector is not
-    threshold-limited, it is starved. Widening the window from 5 ms to 80 ms
-    lifted recall from 0.30 to 0.66 on one scene and 0.16 to 0.66 on another,
-    while dropping the pixel threshold from 2.5 to 0.4 bought only about 0.13.
+    Whether a target is detected depends mostly on how many of its events land
+    in one window. A faint or distant insect may give too few events in 5 ms to
+    form a blob, and enough in 40 or 80 ms. A bright, fast insect is best seen
+    in a short window, where it does not smear. So this runs every window length
+    in `windows_us` and keeps whatever any of them finds; merge_detections then
+    removes the copies of one target found at several lengths.
 
-    So integrate at several scales and keep whatever any of them finds. Bright
-    fast targets are caught by the short windows without smearing; faint slow
-    ones need the long ones.
+    The hop is `scale_hop` times each window. Doubling the window halves the
+    number of steps, so the default five lengths cost about twice the shortest
+    one alone, not five times.
 
-    The hop is proportional to the window, which is what keeps this affordable:
-    each doubling of the window halves the number of steps, so the whole bank
-    costs roughly twice the finest scale alone rather than five times it.
-
-    `min_events` is scaled with the window too, since a fixed floor would make
-    the long windows trivially easy to trigger and flood the merge with clutter.
+    The blob event gate (`min_events_blob`, or its older name `min_events`) is
+    given for `window_us` and scaled in proportion to each window, with a floor
+    of 8. A fixed gate would make the long windows far easier to trigger and
+    flood the merge with clutter. Other keyword arguments go to detect_blobs
+    unchanged; any `hop_us` passed is ignored.
     """
     if len(ev) == 0:
         return []
@@ -171,32 +181,32 @@ def detect_blobs_multiscale(
             ev,
             window_us=int(w),
             hop_us=max(int(w * scale_hop), 1),
-            # The BLOB gate scales with the window; the FRAME gate must not, or
-            # the long scales silently switch themselves off. They used to be one
-            # parameter, and the 80 ms scale inherited a frame gate of 160.
+            # Only the blob gate scales with the window. A whole-frame gate
+            # passed through kwargs is left as given: scaling it would make the
+            # long windows skip frames that the short ones keep.
             min_events_blob=max(int(round(base_min_events * scale)), 8),
-            # Forward the caller's origin, or None. None lets every scale take
-            # its own ABSOLUTE anchor ((t0 // hop) * hop); the default hops
-            # nest (2.5/5/10/20/40 ms), so all scales land phase-0 on the
-            # shared timebase and detections still match across windows by
-            # timestamp. This used to hard-code int(ev.t[0]) -- anchoring on
-            # the first SURVIVING event, the exact survivor-dependent-phase
-            # defect the absolute anchor was built to remove (same arm +68
-            # aligned / -17 misaligned) -- and, because it was hard-coded,
-            # passing grid_origin_us raised TypeError, so the documented
-            # remedy was unreachable. Found by the 2026-08-10 review.
+            # None gives each window length its own absolute grid,
+            # (t0 // hop) * hop. The default hops (2.5, 5, 10, 20, 40 ms) are
+            # multiples of each other, so every grid starts on a multiple of
+            # the shortest hop and all lengths stay in phase.
             grid_origin_us=grid_origin_us,
             **kwargs,
         ))
-    # The merge radius has to cover the coarsest scale's own blobs: at 80 ms a
-    # fast target legitimately spans tens of pixels, and a fixed 12 px cannot
-    # merge its coarse and fine detections at all.
+    # The merge radius must cover the longest window's blobs. At 80 ms a fast
+    # target smears across tens of pixels, so its centroid can sit well over
+    # 12 px from the short-window detection of the same insect. The radius grows
+    # by about 0.36 px per ms of the longest window, above a 12 px base.
     dist = max(merge_dist_px, 0.3 * max(windows_us) / 1000.0 * 1.2 + 12.0)
     return merge_detections(out, merge_time_us, dist)
 
 
 def _label_components(mask: np.ndarray):
-    """Connected components, with a small pure-numpy fallback if cv2 is absent."""
+    """8-connected components of a boolean mask.
+
+    Returns (n, labels, stats, centroids) in OpenCV's layout: label 0 is the
+    background, and each stats row is x, y, width, height, area in pixels.
+    Uses OpenCV when installed, else scipy with the same output layout.
+    """
     if cv2 is not None:
         n, labels, stats, centroids = cv2.connectedComponentsWithStats(
             mask.astype(np.uint8), connectivity=8
@@ -215,11 +225,12 @@ def _label_components(mask: np.ndarray):
 
 
 def psf_peak(blur_sigma: float) -> float:
-    """Blurred density a SINGLE event deposits at its own pixel.
+    """Blurred density that one event leaves at its own pixel.
 
-    The number `pixel_threshold` has to be read against. 0.1592 at sigma 1.0,
-    0.1105 at 1.2. Without it, "blurred event count per pixel" reads as though
-    pixel_threshold=0.5 meant half an event; it means 3.1 of them.
+    `pixel_threshold` should be read in units of this value: 0.159 at sigma 1.0
+    and 0.111 at sigma 1.2. So pixel_threshold=0.5 at sigma 1.0 does not mean
+    half an event. It means about 3.1 events on the same pixel. With no blur
+    one event counts 1.0.
     """
     if blur_sigma <= 0:
         return 1.0
@@ -249,80 +260,78 @@ def detect_blobs(
 ) -> List[Detection]:
     """Sliding-window connected-component detection.
 
-    backend
-        ``"auto"`` uses the Rust accelerator when installed, else Python/OpenCV.
-        ``"rust"`` requires ``insect_evs_rust``. ``"python"`` forces the reference
-        path (use this when checking bit-level agreement).
+    Returns a list of Detection, in window order. All times are in
+    microseconds (us) and all sizes in pixels (px).
 
     window_us
-        Long enough to accumulate a readable blob, short enough that the target
-        does not smear. At 150 px/s a 10 ms window smears 1.5 px, which is fine;
-        at 1000 px/s you want 2-3 ms.
+        Length of each window. Long enough to collect a readable blob, short
+        enough that the target does not smear. At 150 px/s a 10 ms window
+        smears 1.5 px, which is fine; at 1000 px/s use 2 to 3 ms.
+    hop_us
+        Time between the starts of successive windows. A hop of half the
+        window means each event falls in two windows.
+    blur_sigma
+        Width in px of the Gaussian blur applied to the count image, so that
+        events on neighbouring pixels add up. 0 turns the blur off.
     coincidence
-        HOW MANY EVENTS MUST LAND ON ONE PIXEL before it can join a blob. This is
-        the detector's real sensitivity floor and the parameter to reach for. It
-        is converted to a density internally as `coincidence * psf_peak(sigma)`,
-        so it means the same thing at any blur width -- which raw
-        `pixel_threshold` does not. `coincidence=1` admits a lone event.
+        How many events must land on one pixel before it can join a blob. This
+        sets the detector's sensitivity. It is converted to a density as
+        `coincidence * psf_peak(blur_sigma)`, so it means the same thing at any
+        blur width. `coincidence=1` admits a pixel with a single event.
     pixel_threshold
-        The raw density, if you would rather set it directly. Overrides
-        `coincidence` when given. NOTE it is NOT "blurred event count per pixel":
-        cv2.GaussianBlur normalises, so one event deposits only
-        `psf_peak(blur_sigma)` = 0.159 at sigma 1.0. The old default of 1.5 with
-        sigma 1.2 demanded 13.6 coincident events and found 99 tracks where the
-        labels hold 609.
+        The density threshold, if you would rather set it directly. Overrides
+        `coincidence` when given. It is not an event count: the blur is
+        normalised, so one event adds only `psf_peak(blur_sigma)` to its own
+        pixel, 0.159 at sigma 1.0. A threshold of 1.5 at sigma 1.2 needs about
+        14 events on one pixel and misses most insects.
     min_events_blob
-        Events a BLOB must contain. This is what almost every caller means, and
-        `min_events` is kept as an alias for it.
-        Two caveats, both measured: it is compared against a count that has
-        ALREADY been decimated, because an event joins a blob only if its own
-        pixel cleared the threshold (20% of events in a window are dropped before
-        this test); and of the components it rejects, 68% are entirely target.
+        A blob with fewer events is dropped. `min_events` is an older name for
+        the same thing, kept so existing calls still work; when given it
+        overrides `min_events_blob`. Only events on pixels that cleared the
+        threshold are counted, so this count is already lower than the number
+        of events the insect produced in the window.
     min_events_frame
-        Events the WHOLE FRAME must contain before the window is considered at
-        all. Defaults to 0 -- off. It was previously fused with the blob gate
-        under one name, where it never fired on whole-scene calls but erased 70%
-        of targets when the same value was passed for a single target's events.
+        A window with fewer events in the whole frame is skipped. Default 0,
+        which only skips empty windows.
+    min_area_px, max_area_px
+        A blob whose mask area in pixels falls outside this range is dropped.
+        `max_area_px=None` means 5% of the sensor's pixels.
     max_size_px
-        Reject blobs whose larger bbox side exceeds this. Scale it with the
-        window: at 5-20 ms it never fires, but at 80 ms a fixed 90 px discards
-        43% of all target events, because a long window legitimately smears a
-        fast target across tens of pixels. `None` scales it automatically.
+        A blob whose larger bounding-box side exceeds this is dropped. The limit
+        must grow with the window, because a long window smears a fast target
+        across tens of pixels. `None` sets it to 40 px plus 1.2 px per ms of
+        window, capped at 35% of the sensor's shorter side.
     nms_dist_px
-        Suppress same-instant duplicate detections within this distance, keeping
-        the richest. Two blobs on one animal are the single largest cause of
-        track fragmentation -- 49% of all track breaks -- so this is ON.
+        Within one window, of two blobs closer than this, keep only the one with
+        more events. One insect often appears as two blobs, and each would
+        start its own track. Default 25 px.
 
-        PASS 0 WHEN BUILDING A GROUND-TRUTH REFERENCE SET. Suppression cannot
-        tell one animal reported twice from two animals passing within 25 px, so
-        on a labelled-target-only stream it merges genuine neighbours: measured,
-        the AEMOT reference set comes back as 1,381 tracks with the default
-        against 1,505 with `nms_dist_px=0`. A denominator built with it is
-        silently 8% too small, and every recall computed against it too high.
+        Pass 0 when every animal must be counted, for example when building a
+        reference set from labelled events. Suppression cannot tell one animal
+        reported twice from two animals within 25 px of each other, so it merges
+        genuine neighbours and the count comes out too low.
     grid_origin_us
-        Anchor the window grid here instead of at this stream's first event, so
-        that several calls on different streams share one `t_us` grid and their
-        detections can be matched by timestamp.
+        Start the window grid here. By default windows start on multiples of
+        `hop_us` from time zero, so calls on different streams that share a
+        timebase and a hop already share a grid. Give an origin to force a
+        particular phase. If it lies after the first event, the grid is moved
+        back by whole hops so the first event still falls in a window.
+    backend
+        "auto" uses the compiled insect_evs_rust extension when it is installed
+        and the call has no blur and no negative times, else the Python/OpenCV
+        path. "rust" forces the extension. "python" forces the reference path.
     """
     if len(ev) == 0:
         return []
     if min_events is not None:
         min_events_blob = min_events
 
-    # backend="auto" prefers Rust ONLY where the two paths are verified
-    # bit-identical: the no-blur path. Two measured divergences keep the
-    # blurred and negative-time cases on the reference path (2026-08-10
-    # review, both reproduced):
-    #   * stamp_gaussian applies reflect-101 to the DESTINATION while
-    #     scattering -- the transpose of OpenCV's gather -- so blurred density
-    #     within ~4 px of the frame border is wrong by up to 2x and the Rust
-    #     path emits detections the reference path does not. The 0.07%
-    #     detection mismatch previously recorded as float noise is this bug.
-    #   * the wrapper encodes grid_origin_us=None as -1, so every negative
-    #     origin is silently discarded, and the Rust anchor uses truncating
-    #     division where Python floors -- both put the backends on different
-    #     window grids for rebased (negative-time) streams.
-    # backend="rust" remains an explicit override for people who accept this.
+    # backend="auto" uses the Rust extension only where it gives the same
+    # detections as the Python path: no blur, and no negative times. Outside
+    # that it differs in two ways. With blur, its density within about 4 px of
+    # the frame border differs from OpenCV's, so it can report extra blobs
+    # there. With negative times or a negative grid origin, its window grid
+    # differs from Python's. backend="rust" still forces it.
     _neg_time = bool(len(ev)) and (int(ev.t[0]) < 0
                                    or (grid_origin_us is not None
                                        and int(grid_origin_us) < 0))
@@ -383,6 +392,11 @@ def _detect_blobs_rust(
     nms_dist_px: float,
     grid_origin_us: Optional[int],
 ) -> List[Detection]:
+    """detect_blobs on the optional compiled extension insect_evs_rust. Same
+    arguments and output as _detect_blobs_python. detect_blobs picks it only
+    where the two give the same detections; see the backend note there."""
+    # Sort by time before handing the raw arrays to the extension, as the
+    # Python path does before slicing windows.
     ev = ev.sorted_by_time()
     cols = _rust_detect.detect_blobs_arrays(
         ev.x, ev.y, ev.t, ev.p, ev.width, ev.height,
@@ -399,6 +413,9 @@ def _detect_blobs_rust(
         nms_dist_px=nms_dist_px,
         grid_origin_us=grid_origin_us,
     )
+    # The extension returns one array per Detection field, in this order, with
+    # one entry per detection. Rebuild the Detection objects the rest of the
+    # package expects, casting to plain Python ints and floats.
     (t_us, t0_us, t1_us, xs, ys,
      x0, y0, x1, y1, n_events, area_px, polarity_balance) = cols
     out: List[Detection] = []
@@ -430,43 +447,58 @@ def _detect_blobs_python(
     nms_dist_px: float,
     grid_origin_us: Optional[int],
 ) -> List[Detection]:
+    """detect_blobs on the reference Python/OpenCV path. See detect_blobs for
+    the meaning of every argument."""
+    # Turn "events coincident on one pixel" into the blurred density the mask
+    # is thresholded at. An explicit pixel_threshold skips this.
     if pixel_threshold is None:
         pixel_threshold = coincidence * psf_peak(blur_sigma)
 
+    # time_slice below uses searchsorted, which needs time order.
     ev = ev.sorted_by_time()
     t_end = int(ev.t[-1])
     if grid_origin_us is None:
-        # Anchor on an ABSOLUTE grid, not on this stream's first event.
-        #
-        # Anchoring on ev.t[0] makes the window phase depend on which events
-        # survived whatever filter ran upstream, so changing a Conv1 threshold
-        # silently moves the grid. Measured, that is not a rounding effect: the
-        # same detector arm scored +68 bees when it happened to share a phase
-        # with the grid the reference set was built on and -17 when it did not,
-        # and absolute MT moves by 286 of 1,505 across phases with no change to
-        # the data. Rounding down to a multiple of hop_us makes any two calls on
-        # the same timebase share a grid whatever they were fed.
+        # Start on a multiple of hop_us from time zero, not at this stream's
+        # first event. If the grid followed the first event, its phase would
+        # depend on which events an upstream filter happened to keep, and
+        # changing a filter setting would shift every window. Window phase
+        # alone changes which blobs form, and with them the tracking results.
+        # With an absolute grid, any two calls on the same timebase and hop
+        # share windows, whatever events they were given.
         t_start = (int(ev.t[0]) // hop_us) * hop_us
     else:
         t_start = int(grid_origin_us)
+        # An origin after the first event would leave the earliest events in
+        # no window. Step back by whole hops, which keeps the grid phase, until
+        # the first window starts at or before the first event.
         if t_start > int(ev.t[0]):
             t_start -= ((t_start - int(ev.t[0])) // hop_us + 1) * hop_us
+    # Default area cap: 5% of the sensor's pixels. A component larger than
+    # that is rejected below.
     if max_area_px is None:
         max_area_px = int(0.05 * ev.width * ev.height)
     if max_size_px is None:
-        # A target moving at 1000 px/s smears 1 px per ms, so the cap has to grow
-        # with the window or it starts rejecting the very targets it was meant to
-        # let through.
+        # A target moving at 1000 px/s smears 1 px per ms, so the cap grows
+        # with the window: 40 px plus 1.2 px per ms, and never more than 35% of
+        # the sensor's shorter side. A fixed cap would reject fast insects in
+        # long windows.
         max_size_px = int(min(0.35 * min(ev.width, ev.height),
                               40 + window_us / 1000.0 * 1.2))
 
     detections: List[Detection] = []
+    # Windows of window_us microseconds start every hop_us. The last window
+    # ends at or before t_end; the max() guarantees at least one window when
+    # the stream is shorter than a window.
     for t0 in range(t_start, max(t_end - window_us + 1, t_start + 1), hop_us):
         t1 = t0 + window_us
         win = ev.time_slice(t0, t1)
+        # Skip empty windows, and windows under the optional whole-frame gate.
         if len(win) < max(min_events_frame, 1):
             continue
 
+        # Events per pixel in this window, both polarities, then a Gaussian
+        # blur so neighbouring events add up. Pixels at or above the threshold
+        # form the mask that components are cut from.
         img = win.count_image().astype(np.float32)
         if blur_sigma > 0:
             if cv2 is not None:
@@ -479,23 +511,34 @@ def _detect_blobs_python(
         if not mask.any():
             continue
 
+        # 8-connected components of the mask. Label 0 is the background, so
+        # n <= 1 means no component.
         n, labels, stats, centroids = _label_components(mask)
         if n <= 1:
             continue
 
+        # Component label at each event's pixel. An event on a pixel below the
+        # threshold gets label 0 and joins no blob.
         ev_labels = labels[win.y, win.x]
         for i in range(1, n):
+            # Gate each component on mask area in pixels, then on its larger
+            # bounding-box side in pixels.
             x0, y0, w, h, area = stats[i][:5]
             if area < min_area_px or area > max_area_px:
                 continue
             if max(w, h) > max_size_px:
                 continue
+            # Then on the number of events that landed on the component's pixels.
             sel = ev_labels == i
             n_ev = int(sel.sum())
             if n_ev < min_events_blob:
                 continue
+            # Polarities are +1/-1, so the mean is (ON - OFF) / total.
             pol = win.p[sel]
             balance = float(pol.sum()) / n_ev
+            # The centroid is the mean of the blob's event coordinates, not the
+            # pixel centroid from the labeller, so busy pixels weigh more. The
+            # bbox is half-open and t_us is the window centre.
             detections.append(
                 Detection(
                     t_us=(t0 + t1) // 2, t0_us=t0, t1_us=t1,
@@ -505,9 +548,9 @@ def _detect_blobs_python(
                 )
             )
     if nms_dist_px > 0:
-        # Same-instant only: time_tol_us=0 compares detections sharing a window
-        # centre, so this suppresses one animal reported twice without ever
-        # merging a target with its own past.
+        # Same window only: time_tol_us=0 compares detections that share a
+        # window centre. This removes one animal reported twice in one window,
+        # and never merges a target with its own detection from an earlier one.
         detections = merge_detections(detections, time_tol_us=0,
                                       dist_tol_px=nms_dist_px)
     return detections

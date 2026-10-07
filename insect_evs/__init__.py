@@ -1,2 +1,2 @@
-"""The Ecology insect-evs modules this starter needs, copied by
-analysis/export_starter.py. See PROVENANCE.json."""
+"""The event, noise-filter, detection, tracking and periodicity modules this
+package runs. Where each file came from is recorded in PROVENANCE.json."""
